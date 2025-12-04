@@ -255,10 +255,10 @@ function renewCertForce() {
         return
     fi
     
-    # Используем webroot, Nginx останавливать не надо
     certbot renew --force-renewal
     
     if [ $? -eq 0 ]; then
+        systemctl restart xray
         logSuccess "Сертификат обновлен."
     else
         logError "Ошибка при обновлении сертификата."
@@ -307,7 +307,6 @@ function installNode() {
     mkdir -p $subsDir
     chmod 755 $subsDir
     
-    # Создаем папку для webroot валидации
     mkdir -p /var/www/html
 
     uuid=$(cat /proc/sys/kernel/random/uuid)
@@ -323,28 +322,76 @@ net.ipv4.tcp_keepalive_time = 600
 EOF
     sysctl --system > /dev/null 2>&1
 
+    # ============================================================
+    # ИСПРАВЛЕННАЯ ГЕНЕРАЦИЯ КЛЮЧЕЙ WARP
+    # ============================================================
     logInfo "Генерация ключей WARP..."
     
+    # Сохраняем текущую директорию и переходим в /tmp
+    pushd /tmp > /dev/null
+    
+    # Скачиваем wgcf
     latestWgcf=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest | jq -r '.tag_name' | tr -d 'v')
+    if [ -z "$latestWgcf" ] || [ "$latestWgcf" = "null" ]; then
+        latestWgcf="2.2.22"
+    fi
+    
     wget -qO wgcf "https://github.com/ViRb3/wgcf/releases/download/v${latestWgcf}/wgcf_${latestWgcf}_linux_amd64"
     chmod +x wgcf
+    
+    # Регистрация и генерация
     ./wgcf register --accept-tos > /dev/null 2>&1
     ./wgcf generate > /dev/null 2>&1
     
     if [ ! -f wgcf-profile.conf ]; then
-        logError "Ошибка генерации WARP."
-        exit 1
+        logError "Ошибка генерации WARP. Используем fallback конфигурацию."
+        warpPrivateKey=""
+        warpIpv4="172.16.0.2/32"
+        warpIpv6=""
+    else
+        # Показываем содержимое для отладки
+        logInfo "Содержимое wgcf-profile.conf:"
+        cat wgcf-profile.conf
+        echo ""
+        
+        # Извлекаем PrivateKey (после знака = и убираем пробелы)
+        warpPrivateKey=$(grep "^PrivateKey" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
+        
+        # Извлекаем адреса - каждый Address на отдельной строке
+        # IPv4 - содержит точки
+        warpIpv4=$(grep "^Address" wgcf-profile.conf | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -1)
+        
+        # IPv6 - содержит двоеточия
+        warpIpv6=$(grep "^Address" wgcf-profile.conf | grep -oE '[0-9a-fA-F:]+:[0-9a-fA-F:]+/[0-9]+' | head -1)
+        
+        logInfo "Извлечено: IPv4=$warpIpv4 IPv6=$warpIpv6"
     fi
-
-    warpPrivateKey=$(grep "PrivateKey" wgcf-profile.conf | cut -d' ' -f3)
-    warpIpv6=$(grep "Address" wgcf-profile.conf | sed -n '2p' | cut -d' ' -f3 | cut -d'/' -f1)
+    
+    # Проверяем и устанавливаем значения по умолчанию
+    if [ -z "$warpIpv4" ]; then
+        warpIpv4="172.16.0.2/32"
+        logInfo "Используем IPv4 по умолчанию: $warpIpv4"
+    fi
+    
+    # Формируем JSON массив адресов
+    if [ -n "$warpIpv6" ]; then
+        warpAddressJson="\"$warpIpv4\", \"$warpIpv6\""
+        logSuccess "WARP: IPv4 + IPv6"
+    else
+        warpAddressJson="\"$warpIpv4\""
+        logInfo "WARP: только IPv4 (IPv6 не получен)"
+    fi
+    
+    # Очистка
     rm -f wgcf wgcf-account.toml wgcf-profile.conf
+    
+    # Возвращаемся в исходную директорию
+    popd > /dev/null
+    # ============================================================
 
     logInfo "Настройка Nginx для валидации SSL..."
     
-    # 1. Сначала настраиваем Nginx на 80 порту для получения SSL (Webroot)
-    # Это позволяет не останавливать Nginx при обновлении
-    rm /etc/nginx/sites-enabled/default 2>/dev/null
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null
     
     cat > /etc/nginx/conf.d/00-renewal.conf <<EOF
 server {
@@ -352,12 +399,10 @@ server {
     server_name $domain;
     root /var/www/html;
 
-    # Специальная папка для Certbot
     location /.well-known/acme-challenge/ {
         allow all;
     }
 
-    # Все остальное редиректим на HTTPS (полезно для пользователей)
     location / {
         return 301 https://\$host\$request_uri;
     }
@@ -367,7 +412,6 @@ EOF
 
     logInfo "Получение SSL (Webroot)..."
     
-    # Используем метод webroot - Nginx работает и отдает файлы валидации
     certbot certonly --webroot -w /var/www/html -d $domain --non-interactive --agree-tos -m admin@$domain
 
     if [ ! -f "$certPath/fullchain.pem" ]; then
@@ -376,14 +420,9 @@ EOF
         exit 1
     fi
     
-    # ----------------------------------------------------
-    # НАСТРОЙКА АВТОМАТИЧЕСКОГО ОБНОВЛЕНИЯ (DEPLOY HOOK)
-    # ----------------------------------------------------
     logInfo "Настройка хуков автообновления SSL..."
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 
-    # Нам нужно только перезагрузить Xray, чтобы он увидел новые сертификаты.
-    # Nginx не нужно трогать, так как он используется только как Webroot/Proxy.
     cat > /etc/letsencrypt/renewal-hooks/deploy/01-restart-xray.sh <<EOF
 #!/bin/bash
 systemctl restart xray
@@ -391,14 +430,12 @@ echo "Xray restarted after successful SSL renewal"
 EOF
     chmod +x /etc/letsencrypt/renewal-hooks/deploy/01-restart-xray.sh
     
-    # Удаляем старые/лишние хуки, если они были
     rm -f /etc/letsencrypt/renewal-hooks/pre/01-stop-nginx.sh
     rm -f /etc/letsencrypt/renewal-hooks/post/01-start-nginx.sh
 
     if systemctl list-unit-files | grep -q certbot.timer; then
         systemctl enable --now certbot.timer > /dev/null 2>&1
     fi
-    # ----------------------------------------------------
 
     logInfo "Установка Xray..."
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
@@ -409,7 +446,15 @@ EOF
     systemctl daemon-reload
 
     mkdir -p /usr/local/etc/xray
-    cat > $configFile <<EOF
+    
+    # ============================================================
+    # ИСПРАВЛЕННАЯ ГЕНЕРАЦИЯ КОНФИГА
+    # ============================================================
+    
+    # Проверяем, есть ли у нас ключ WARP
+    if [ -n "$warpPrivateKey" ]; then
+        # Полный конфиг с WARP
+        cat > $configFile <<EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
@@ -454,7 +499,7 @@ EOF
       "protocol": "wireguard",
       "settings": {
         "secretKey": "$warpPrivateKey",
-        "address": [ "172.16.0.2/32", "$warpIpv6/128" ],
+        "address": [ $warpAddressJson ],
         "peers": [
           {
             "publicKey": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
@@ -476,10 +521,64 @@ EOF
   }
 }
 EOF
+    else
+        # Конфиг без WARP (direct)
+        logInfo "WARP ключ не получен, используем direct режим"
+        cat > $configFile <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "flow": "xtls-rprx-vision",
+            "level": 0,
+            "email": "$adminUser"
+          }
+        ],
+        "decryption": "none",
+        "fallbacks": [ { "dest": 8080 } ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "$certPath/fullchain.pem",
+              "keyFile": "$certPath/privkey.pem"
+            }
+          ],
+          "minVersion": "1.2",
+          "alpn": ["http/1.1", "h2"]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls"]
+      }
+    }
+  ],
+  "outbounds": [
+    { "tag": "direct", "protocol": "freedom" },
+    { "tag": "block", "protocol": "blackhole" }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      { "type": "field", "outboundTag": "block", "ip": ["geoip:private"] }
+    ]
+  }
+}
+EOF
+    fi
+    # ============================================================
 
     logInfo "Добавление fallback конфига Nginx (Port 8080)..."
-    # Этот конфиг работает параллельно с 00-renewal.conf
-    # Xray пересылает сюда запросы, похожие на обычный браузер
     cat > /etc/nginx/conf.d/fallback.conf <<EOF
 server {
     listen 127.0.0.1:8080;
@@ -518,6 +617,14 @@ EOF
     systemctl restart xray
     systemctl enable xray > /dev/null 2>&1
     systemctl enable nginx > /dev/null 2>&1
+
+    # Проверяем статус
+    sleep 2
+    if systemctl is-active --quiet xray; then
+        logSuccess "Xray запущен успешно!"
+    else
+        logError "Xray не запустился. Проверьте логи: journalctl -u xray -n 50"
+    fi
 
     echo ""
     logSuccess "Установка завершена."
@@ -657,7 +764,6 @@ function uninstallXray() {
     systemctl stop xray
     systemctl disable xray > /dev/null 2>&1
     
-    # Удаление хуков
     rm -f /etc/letsencrypt/renewal-hooks/deploy/01-restart-xray.sh
     rm -f /etc/letsencrypt/renewal-hooks/pre/01-stop-nginx.sh
     rm -f /etc/letsencrypt/renewal-hooks/post/01-start-nginx.sh
@@ -668,6 +774,7 @@ function uninstallXray() {
     rm -rf /usr/local/share/xray
     rm -rf /var/www/html/subs
     rm -f /etc/systemd/system/xray.service
+    rm -f /etc/systemd/system/xray.service.d -rf
     rm -f /etc/nginx/conf.d/fallback.conf
     rm -f /etc/nginx/conf.d/00-renewal.conf
     rm -f /etc/sysctl.d/99-xray-performance.conf
