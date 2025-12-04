@@ -95,19 +95,6 @@ function healthCheck() {
         ((issues++))
     fi
     
-    # Конфиг Xray
-    if [ -f "$configFile" ]; then
-        if /usr/local/bin/xray run -test -config $configFile > /dev/null 2>&1; then
-            echo -e "  Конфиг:      ${green}✓ валидный${nc}"
-        else
-            echo -e "  Конфиг:      ${red}✕ ошибка${nc}"
-            ((issues++))
-        fi
-    else
-        echo -e "  Конфиг:      ${red}✕ не найден${nc}"
-        ((issues++))
-    fi
-    
     # SSL сертификат
     if [ -f "$infoFile" ]; then
         source $infoFile
@@ -136,20 +123,11 @@ function healthCheck() {
         fi
     fi
     
-    # Версия Xray
-    if [ -f "/usr/local/bin/xray" ]; then
-        local currentVersion=$(/usr/local/bin/xray version 2>/dev/null | head -n1 | awk '{print $2}')
-        local latestVersion=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest 2>/dev/null | jq -r '.tag_name' | tr -d 'v')
-        
-        if [ -n "$currentVersion" ] && [ -n "$latestVersion" ]; then
-            if [ "$currentVersion" = "$latestVersion" ]; then
-                echo -e "  Версия:      ${green}✓ $currentVersion${nc}"
-            else
-                echo -e "  Версия:      ${yellow}⚠ $currentVersion → $latestVersion${nc}"
-            fi
-        else
-            echo -e "  Версия:      ${gray}$currentVersion${nc}"
-        fi
+    # Проверка таймера Certbot
+    if systemctl is-active --quiet certbot.timer; then
+         echo -e "  Auto-Renew:  ${green}✓ активен${nc}"
+    else
+         echo -e "  Auto-Renew:  ${yellow}⚠ таймер не запущен${nc}"
     fi
     
     echo "─────────────────────────────────────"
@@ -269,6 +247,24 @@ function listUsers() {
     echo ""
 }
 
+function renewCertForce() {
+    logInfo "Запуск принудительного обновления сертификата..."
+    
+    if ! command -v certbot &> /dev/null; then
+        logError "Certbot не установлен."
+        return
+    fi
+    
+    # Используем webroot, Nginx останавливать не надо
+    certbot renew --force-renewal
+    
+    if [ $? -eq 0 ]; then
+        logSuccess "Сертификат обновлен."
+    else
+        logError "Ошибка при обновлении сертификата."
+    fi
+}
+
 function installNode() {
     clear
     
@@ -283,7 +279,7 @@ function installNode() {
         systemctl stop nginx
     fi
 
-    echo -e "${green}Установка Xray + WARP${nc}\n"
+    echo -e "${green}Установка Xray + WARP (Режим Webroot)${nc}\n"
 
     read -p "Домен: " domain
     if [ -z "$domain" ]; then logError "Домен обязателен."; exit 1; fi
@@ -310,6 +306,9 @@ function installNode() {
     rm -rf $subsDir
     mkdir -p $subsDir
     chmod 755 $subsDir
+    
+    # Создаем папку для webroot валидации
+    mkdir -p /var/www/html
 
     uuid=$(cat /proc/sys/kernel/random/uuid)
     certPath="/etc/letsencrypt/live/$domain"
@@ -328,17 +327,10 @@ EOF
     
     latestWgcf=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest | jq -r '.tag_name' | tr -d 'v')
     wget -qO wgcf "https://github.com/ViRb3/wgcf/releases/download/v${latestWgcf}/wgcf_${latestWgcf}_linux_amd64"
-    
-    if [ ! -f wgcf ]; then
-        logError "Ошибка скачивания wgcf."
-        exit 1
-    fi
-    
     chmod +x wgcf
-
     ./wgcf register --accept-tos > /dev/null 2>&1
     ./wgcf generate > /dev/null 2>&1
-
+    
     if [ ! -f wgcf-profile.conf ]; then
         logError "Ошибка генерации WARP."
         exit 1
@@ -348,17 +340,65 @@ EOF
     warpIpv6=$(grep "Address" wgcf-profile.conf | sed -n '2p' | cut -d' ' -f3 | cut -d'/' -f1)
     rm -f wgcf wgcf-account.toml wgcf-profile.conf
 
-    logInfo "Получение SSL..."
-    systemctl stop nginx
-    systemctl stop xray 2>/dev/null
+    logInfo "Настройка Nginx для валидации SSL..."
     
-    certbot certonly --standalone --preferred-challenges http -d $domain --non-interactive --agree-tos -m admin@$domain
+    # 1. Сначала настраиваем Nginx на 80 порту для получения SSL (Webroot)
+    # Это позволяет не останавливать Nginx при обновлении
+    rm /etc/nginx/sites-enabled/default 2>/dev/null
+    
+    cat > /etc/nginx/conf.d/00-renewal.conf <<EOF
+server {
+    listen 80;
+    server_name $domain;
+    root /var/www/html;
+
+    # Специальная папка для Certbot
+    location /.well-known/acme-challenge/ {
+        allow all;
+    }
+
+    # Все остальное редиректим на HTTPS (полезно для пользователей)
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+EOF
+    systemctl restart nginx
+
+    logInfo "Получение SSL (Webroot)..."
+    
+    # Используем метод webroot - Nginx работает и отдает файлы валидации
+    certbot certonly --webroot -w /var/www/html -d $domain --non-interactive --agree-tos -m admin@$domain
 
     if [ ! -f "$certPath/fullchain.pem" ]; then
         logError "Ошибка получения сертификата."
-        echo "Попробуйте: certbot certonly --standalone -d $domain"
+        echo "Проверьте, что домен $domain направлен на IP сервера."
         exit 1
     fi
+    
+    # ----------------------------------------------------
+    # НАСТРОЙКА АВТОМАТИЧЕСКОГО ОБНОВЛЕНИЯ (DEPLOY HOOK)
+    # ----------------------------------------------------
+    logInfo "Настройка хуков автообновления SSL..."
+    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+
+    # Нам нужно только перезагрузить Xray, чтобы он увидел новые сертификаты.
+    # Nginx не нужно трогать, так как он используется только как Webroot/Proxy.
+    cat > /etc/letsencrypt/renewal-hooks/deploy/01-restart-xray.sh <<EOF
+#!/bin/bash
+systemctl restart xray
+echo "Xray restarted after successful SSL renewal"
+EOF
+    chmod +x /etc/letsencrypt/renewal-hooks/deploy/01-restart-xray.sh
+    
+    # Удаляем старые/лишние хуки, если они были
+    rm -f /etc/letsencrypt/renewal-hooks/pre/01-stop-nginx.sh
+    rm -f /etc/letsencrypt/renewal-hooks/post/01-start-nginx.sh
+
+    if systemctl list-unit-files | grep -q certbot.timer; then
+        systemctl enable --now certbot.timer > /dev/null 2>&1
+    fi
+    # ----------------------------------------------------
 
     logInfo "Установка Xray..."
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
@@ -437,8 +477,9 @@ EOF
 }
 EOF
 
-    logInfo "Настройка Nginx..."
-    rm /etc/nginx/sites-enabled/default 2>/dev/null
+    logInfo "Добавление fallback конфига Nginx (Port 8080)..."
+    # Этот конфиг работает параллельно с 00-renewal.conf
+    # Xray пересылает сюда запросы, похожие на обычный браузер
     cat > /etc/nginx/conf.d/fallback.conf <<EOF
 server {
     listen 127.0.0.1:8080;
@@ -616,6 +657,11 @@ function uninstallXray() {
     systemctl stop xray
     systemctl disable xray > /dev/null 2>&1
     
+    # Удаление хуков
+    rm -f /etc/letsencrypt/renewal-hooks/deploy/01-restart-xray.sh
+    rm -f /etc/letsencrypt/renewal-hooks/pre/01-stop-nginx.sh
+    rm -f /etc/letsencrypt/renewal-hooks/post/01-start-nginx.sh
+
     logInfo "Удаление файлов..."
     rm -rf /usr/local/bin/xray
     rm -rf /usr/local/etc/xray
@@ -623,6 +669,7 @@ function uninstallXray() {
     rm -rf /var/www/html/subs
     rm -f /etc/systemd/system/xray.service
     rm -f /etc/nginx/conf.d/fallback.conf
+    rm -f /etc/nginx/conf.d/00-renewal.conf
     rm -f /etc/sysctl.d/99-xray-performance.conf
     
     systemctl daemon-reload
@@ -670,9 +717,10 @@ function showMenu() {
             echo "  5. Health check"
             echo "  6. Перезапустить"
             echo "  7. Обновить Xray"
+            echo "  8. Обновить SSL (Force)"
             echo ""
-            echo -e "${gray}  8. Переустановить${nc}"
-            echo -e "${gray}  9. Удалить Xray${nc}"
+            echo -e "${gray}  9. Переустановить${nc}"
+            echo -e "${gray}  10. Удалить Xray${nc}"
         else
             echo ""
             echo "  1. Установить Xray"
@@ -698,8 +746,9 @@ function showMenu() {
                 5) healthCheck; read -p "Enter..." ;;
                 6) restartServices; read -p "Enter..." ;;
                 7) updateXray; read -p "Enter..." ;;
-                8) installNode; read -p "Enter..." ;;
-                9) uninstallXray; read -p "Enter..." ;;
+                8) renewCertForce; read -p "Enter..." ;;
+                9) installNode; read -p "Enter..." ;;
+                10) uninstallXray; read -p "Enter..." ;;
                 0) exit ;;
                 *) ;;
             esac
@@ -719,6 +768,7 @@ function showHelp() {
     echo "  status        - Статус сервисов"
     echo "  restart       - Перезапустить"
     echo "  update        - Обновить Xray"
+    echo "  renew         - Принудительно обновить SSL"
     echo "  remove        - Удалить Xray"
 }
 
@@ -735,6 +785,7 @@ else
         status)   showStatus ;;
         restart)  restartServices ;;
         update)   updateXray ;;
+        renew)    renewCertForce ;;
         remove)   uninstallXray ;;
         help|-h)  showHelp ;;
         *)        showHelp ;;
