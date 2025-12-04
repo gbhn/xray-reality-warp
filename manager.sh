@@ -7,6 +7,8 @@ subsDir="/var/www/html/subs"
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[1;33m'
+cyan='\033[0;36m'
+gray='\033[0;90m'
 nc='\033[0m'
 
 if [ "$EUID" -ne 0 ]; then
@@ -33,6 +35,238 @@ function showQr() {
 
 function toBase64() {
     echo -n "$1" | base64 | tr '+/' '-_' | tr -d '='
+}
+
+function getStatus() {
+    if [ ! -f "/usr/local/bin/xray" ]; then
+        echo "not_installed"
+    elif systemctl is-active --quiet xray; then
+        echo "running"
+    else
+        echo "stopped"
+    fi
+}
+
+function getUserCount() {
+    if [ -f "$configFile" ]; then
+        jq -r '.inbounds[0].settings.clients | length' $configFile 2>/dev/null || echo "0"
+    else
+        echo "0"
+    fi
+}
+
+function getDomain() {
+    if [ -f "$infoFile" ]; then
+        grep "domain=" $infoFile | cut -d'=' -f2
+    else
+        echo "-"
+    fi
+}
+
+function healthCheck() {
+    echo ""
+    logInfo "Проверка системы..."
+    echo ""
+    echo "─────────────────────────────────────"
+    
+    local issues=0
+    
+    # Xray
+    if systemctl is-active --quiet xray; then
+        echo -e "  Xray:        ${green}✓ работает${nc}"
+    else
+        echo -e "  Xray:        ${red}✕ остановлен${nc}"
+        ((issues++))
+    fi
+    
+    # Nginx
+    if systemctl is-active --quiet nginx; then
+        echo -e "  Nginx:       ${green}✓ работает${nc}"
+    else
+        echo -e "  Nginx:       ${red}✕ остановлен${nc}"
+        ((issues++))
+    fi
+    
+    # Порт 443
+    if ss -tlnp | grep -q ':443'; then
+        echo -e "  Порт 443:    ${green}✓ открыт${nc}"
+    else
+        echo -e "  Порт 443:    ${red}✕ закрыт${nc}"
+        ((issues++))
+    fi
+    
+    # Конфиг Xray
+    if [ -f "$configFile" ]; then
+        if /usr/local/bin/xray run -test -config $configFile > /dev/null 2>&1; then
+            echo -e "  Конфиг:      ${green}✓ валидный${nc}"
+        else
+            echo -e "  Конфиг:      ${red}✕ ошибка${nc}"
+            ((issues++))
+        fi
+    else
+        echo -e "  Конфиг:      ${red}✕ не найден${nc}"
+        ((issues++))
+    fi
+    
+    # SSL сертификат
+    if [ -f "$infoFile" ]; then
+        source $infoFile
+        local certPath="/etc/letsencrypt/live/$domain"
+        
+        if [ -f "$certPath/fullchain.pem" ]; then
+            local expiry=$(openssl x509 -enddate -noout -in "$certPath/fullchain.pem" 2>/dev/null | cut -d= -f2)
+            if [ -n "$expiry" ]; then
+                local expiryEpoch=$(date -d "$expiry" +%s 2>/dev/null)
+                local nowEpoch=$(date +%s)
+                local daysLeft=$(( (expiryEpoch - nowEpoch) / 86400 ))
+                
+                if [ $daysLeft -gt 30 ]; then
+                    echo -e "  SSL:         ${green}✓ $daysLeft дней${nc}"
+                elif [ $daysLeft -gt 7 ]; then
+                    echo -e "  SSL:         ${yellow}⚠ $daysLeft дней${nc}"
+                    ((issues++))
+                else
+                    echo -e "  SSL:         ${red}✕ $daysLeft дней!${nc}"
+                    ((issues++))
+                fi
+            fi
+        else
+            echo -e "  SSL:         ${red}✕ не найден${nc}"
+            ((issues++))
+        fi
+    fi
+    
+    # Версия Xray
+    if [ -f "/usr/local/bin/xray" ]; then
+        local currentVersion=$(/usr/local/bin/xray version 2>/dev/null | head -n1 | awk '{print $2}')
+        local latestVersion=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest 2>/dev/null | jq -r '.tag_name' | tr -d 'v')
+        
+        if [ -n "$currentVersion" ] && [ -n "$latestVersion" ]; then
+            if [ "$currentVersion" = "$latestVersion" ]; then
+                echo -e "  Версия:      ${green}✓ $currentVersion${nc}"
+            else
+                echo -e "  Версия:      ${yellow}⚠ $currentVersion → $latestVersion${nc}"
+            fi
+        else
+            echo -e "  Версия:      ${gray}$currentVersion${nc}"
+        fi
+    fi
+    
+    echo "─────────────────────────────────────"
+    echo ""
+    
+    if [ $issues -eq 0 ]; then
+        logSuccess "Все проверки пройдены."
+    else
+        logError "Обнаружено проблем: $issues"
+    fi
+}
+
+function updateXray() {
+    echo ""
+    
+    if [ ! -f "/usr/local/bin/xray" ]; then
+        logError "Xray не установлен."
+        return
+    fi
+    
+    local currentVersion=$(/usr/local/bin/xray version 2>/dev/null | head -n1 | awk '{print $2}')
+    local latestVersion=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name' | tr -d 'v')
+    
+    echo "  Текущая версия:  $currentVersion"
+    echo "  Последняя версия: $latestVersion"
+    echo ""
+    
+    if [ "$currentVersion" = "$latestVersion" ]; then
+        logSuccess "Уже установлена последняя версия."
+        return
+    fi
+    
+    read -p "Обновить Xray? [y/n]: " confirm
+    if [[ "$confirm" != "y" ]]; then
+        echo "Отменено."
+        return
+    fi
+    
+    logInfo "Создание бэкапа конфигурации..."
+    cp $configFile "${configFile}.backup_$(date +%Y%m%d_%H%M%S)"
+    
+    logInfo "Обновление Xray..."
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        sed -i 's/User=nobody/User=root/' /etc/systemd/system/xray.service
+        sed -i '/^CapabilityBoundingSet/d' /etc/systemd/system/xray.service
+        sed -i '/^AmbientCapabilities/d' /etc/systemd/system/xray.service
+        systemctl daemon-reload
+        systemctl restart xray
+        
+        local newVersion=$(/usr/local/bin/xray version 2>/dev/null | head -n1 | awk '{print $2}')
+        logSuccess "Xray обновлен: $currentVersion → $newVersion"
+    else
+        logError "Ошибка обновления."
+    fi
+}
+
+function showStatus() {
+    echo ""
+    logInfo "Статус сервисов..."
+    echo ""
+    
+    local xrayStatus=$(systemctl is-active xray 2>/dev/null)
+    local nginxStatus=$(systemctl is-active nginx 2>/dev/null)
+    
+    if [ "$xrayStatus" = "active" ]; then
+        echo -e "  Xray:  ${green}●${nc} работает"
+    else
+        echo -e "  Xray:  ${red}●${nc} остановлен"
+    fi
+    
+    if [ "$nginxStatus" = "active" ]; then
+        echo -e "  Nginx: ${green}●${nc} работает"
+    else
+        echo -e "  Nginx: ${red}●${nc} остановлен"
+    fi
+    
+    echo ""
+    if [ -f "$configFile" ]; then
+        local count=$(getUserCount)
+        echo "  Пользователей: $count"
+    fi
+}
+
+function restartServices() {
+    logInfo "Перезапуск сервисов..."
+    systemctl restart xray
+    systemctl restart nginx
+    sleep 1
+    showStatus
+}
+
+function listUsers() {
+    if [ ! -f "$configFile" ]; then
+        logError "Конфигурация не найдена."
+        return
+    fi
+    
+    echo ""
+    echo -e "${cyan}Пользователи:${nc}"
+    echo "─────────────────────────────"
+    
+    local users=$(jq -r '.inbounds[0].settings.clients[] | .email' $configFile 2>/dev/null)
+    
+    if [ -z "$users" ]; then
+        echo -e "${gray}  Нет пользователей${nc}"
+    else
+        local i=1
+        while IFS= read -r user; do
+            echo -e "  $i. $user"
+            ((i++))
+        done <<< "$users"
+    fi
+    
+    echo "─────────────────────────────"
+    echo ""
 }
 
 function installNode() {
@@ -91,7 +325,15 @@ EOF
     sysctl --system > /dev/null 2>&1
 
     logInfo "Генерация ключей WARP..."
-    wget -qO wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64
+    
+    latestWgcf=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest | jq -r '.tag_name' | tr -d 'v')
+    wget -qO wgcf "https://github.com/ViRb3/wgcf/releases/download/v${latestWgcf}/wgcf_${latestWgcf}_linux_amd64"
+    
+    if [ ! -f wgcf ]; then
+        logError "Ошибка скачивания wgcf."
+        exit 1
+    fi
+    
     chmod +x wgcf
 
     ./wgcf register --accept-tos > /dev/null 2>&1
@@ -104,7 +346,7 @@ EOF
 
     warpPrivateKey=$(grep "PrivateKey" wgcf-profile.conf | cut -d' ' -f3)
     warpIpv6=$(grep "Address" wgcf-profile.conf | sed -n '2p' | cut -d' ' -f3 | cut -d'/' -f1)
-    rm wgcf wgcf-account.toml wgcf-profile.conf
+    rm -f wgcf wgcf-account.toml wgcf-profile.conf
 
     logInfo "Получение SSL..."
     systemctl stop nginx
@@ -254,7 +496,8 @@ function addUser() {
     source $infoFile
 
     if [[ -z "$userName" ]]; then
-        read -p "Имя пользователя: " userName
+        listUsers
+        read -p "Имя нового пользователя: " userName
     fi
 
     if [[ -z "$userName" ]]; then logError "Имя обязательно."; return; fi
@@ -281,12 +524,10 @@ function addUser() {
     chmod 644 "$subsDir/$userFilename"
 
     logSuccess "Пользователь $userName добавлен."
-    echo "ID файла: $userFilename"
     
-    echo "---------------------------------------------------"
+    echo ""
     echo -e "${yellow}Ссылка подписки:${nc} $subLink"
     showQr "$subLink" "Подписка $userName"
-    echo "---------------------------------------------------"
 }
 
 function showUserInfo() {
@@ -296,9 +537,7 @@ function showUserInfo() {
     source $infoFile
 
     if [[ -z "$targetUser" ]]; then
-        echo -e "${yellow}Пользователи:${nc}"
-        jq -r '.inbounds[0].settings.clients[] | .email' $configFile
-        echo "--------------------------------"
+        listUsers
         read -p "Имя пользователя: " targetUser
     fi
 
@@ -323,13 +562,13 @@ function showUserInfo() {
 
     clear
     echo -e "${green}Пользователь: $targetUser${nc}"
-    echo "---------------------------------------------------"
+    echo "─────────────────────────────────────────"
     
     echo -e "Ссылка подписки:"
     echo -e "${yellow}$subLink${nc}"
     showQr "$subLink" "Подписка $targetUser"
     
-    echo "---------------------------------------------------"
+    echo "─────────────────────────────────────────"
     echo -e "Ключ VLESS:"
     echo -e "${yellow}$vlessLink${nc}"
     showQr "$vlessLink" "Ключ VLESS"
@@ -342,9 +581,7 @@ function deleteUser() {
     source $infoFile
 
     if [[ -z "$userName" ]]; then
-        echo -e "${yellow}Пользователи:${nc}"
-        jq -r '.inbounds[0].settings.clients[] | .email' $configFile
-        echo ""
+        listUsers
         read -p "Имя для удаления: " userName
     fi
 
@@ -352,6 +589,9 @@ function deleteUser() {
 
     local userExists=$(jq --arg email "$userName" '.inbounds[0].settings.clients[] | select(.email == $email) | .email' $configFile)
     if [[ -z "$userExists" ]]; then logError "Пользователь не найден."; return; fi
+
+    read -p "Удалить $userName? [y/n]: " confirm
+    if [[ "$confirm" != "y" ]]; then echo "Отменено."; return; fi
 
     cp $configFile "${configFile}.bak"
     jq --arg email "$userName" 'del(.inbounds[0].settings.clients[] | select(.email == $email))' $configFile > temp.json && mv temp.json $configFile
@@ -361,15 +601,14 @@ function deleteUser() {
     userFilename=$(toBase64 "$userName")
     if [ -f "$subsDir/$userFilename" ]; then
         rm "$subsDir/$userFilename"
-        logSuccess "Файл подписки $userName удален."
-    else
-        logInfo "Файл подписки не найден."
     fi
 
     logSuccess "Пользователь $userName удален."
 }
 
 function uninstallXray() {
+    echo ""
+    echo -e "${red}Внимание: все данные будут удалены!${nc}"
     read -p "Удалить Xray полностью? [y/n]: " confirm
     if [[ "$confirm" != "y" ]]; then return; fi
 
@@ -395,47 +634,109 @@ function uninstallXray() {
 function showMenu() {
     while true; do
         clear
-        echo -e "${green}Xray Manager${nc}"
-        echo "1. Установить"
-        echo "2. Добавить пользователя"
-        echo "3. Показать пользователя"
-        echo "4. Удалить пользователя"
-        echo "5. Удалить Xray"
-        echo "0. Выход"
-        echo ""
-        read -p "> " choice
-
-        case "$choice" in
-            1) installNode; read -p "Enter..." ;;
-            2) addUser; read -p "Enter..." ;;
-            3) showUserInfo; read -p "Enter..." ;;
-            4) deleteUser; read -p "Enter..." ;;
-            5) uninstallXray; read -p "Enter..." ;;
-            0) exit ;;
-            *) ;;
+        
+        echo -e "${cyan}═══════════════════════════════════════${nc}"
+        echo -e "${cyan}           XRAY MANAGER${nc}"
+        echo -e "${cyan}═══════════════════════════════════════${nc}"
+        
+        local status=$(getStatus)
+        local domain=$(getDomain)
+        
+        case $status in
+            "running")
+                echo -e "  Статус: ${green}● Работает${nc}"
+                echo -e "  Домен:  $domain"
+                echo -e "  Пользователей: $(getUserCount)"
+                ;;
+            "stopped")
+                echo -e "  Статус: ${red}● Остановлен${nc}"
+                echo -e "  Домен:  $domain"
+                ;;
+            "not_installed")
+                echo -e "  Статус: ${gray}○ Не установлен${nc}"
+                ;;
         esac
+        
+        echo -e "${cyan}───────────────────────────────────────${nc}"
+        
+        if [ "$status" != "not_installed" ]; then
+            echo -e "${yellow} Пользователи${nc}"
+            echo "  1. Список"
+            echo "  2. Добавить"
+            echo "  3. Показать данные"
+            echo "  4. Удалить"
+            echo ""
+            echo -e "${yellow} Система${nc}"
+            echo "  5. Health check"
+            echo "  6. Перезапустить"
+            echo "  7. Обновить Xray"
+            echo ""
+            echo -e "${gray}  8. Переустановить${nc}"
+            echo -e "${gray}  9. Удалить Xray${nc}"
+        else
+            echo ""
+            echo "  1. Установить Xray"
+        fi
+        
+        echo ""
+        echo "  0. Выход"
+        echo -e "${cyan}───────────────────────────────────────${nc}"
+        read -p "  > " choice
+
+        if [ "$status" = "not_installed" ]; then
+            case "$choice" in
+                1) installNode; read -p "Enter..." ;;
+                0) exit ;;
+                *) ;;
+            esac
+        else
+            case "$choice" in
+                1) listUsers; read -p "Enter..." ;;
+                2) addUser; read -p "Enter..." ;;
+                3) showUserInfo; read -p "Enter..." ;;
+                4) deleteUser; read -p "Enter..." ;;
+                5) healthCheck; read -p "Enter..." ;;
+                6) restartServices; read -p "Enter..." ;;
+                7) updateXray; read -p "Enter..." ;;
+                8) installNode; read -p "Enter..." ;;
+                9) uninstallXray; read -p "Enter..." ;;
+                0) exit ;;
+                *) ;;
+            esac
+        fi
     done
 }
 
 function showHelp() {
     echo "Использование: $0 [команда]"
-    echo "  install       - Установка"
+    echo ""
+    echo "  install       - Установить Xray"
     echo "  add <name>    - Добавить пользователя"
-    echo "  show <name>   - Показать пользователя"
+    echo "  show <name>   - Показать данные пользователя"
+    echo "  list          - Список пользователей"
     echo "  del <name>    - Удалить пользователя"
-    echo "  remove        - Удалить всё"
+    echo "  health        - Проверка системы"
+    echo "  status        - Статус сервисов"
+    echo "  restart       - Перезапустить"
+    echo "  update        - Обновить Xray"
+    echo "  remove        - Удалить Xray"
 }
 
 if [ $# -eq 0 ]; then
     showMenu
 else
     case "$1" in
-        install) installNode ;;
-        add)     addUser "$2" ;;
-        show|list) showUserInfo "$2" ;;
-        del)     deleteUser "$2" ;;
-        remove)  uninstallXray ;;
-        help)    showHelp ;;
-        *)       showHelp ;;
+        install)  installNode ;;
+        add)      addUser "$2" ;;
+        show)     showUserInfo "$2" ;;
+        list)     listUsers ;;
+        del)      deleteUser "$2" ;;
+        health)   healthCheck ;;
+        status)   showStatus ;;
+        restart)  restartServices ;;
+        update)   updateXray ;;
+        remove)   uninstallXray ;;
+        help|-h)  showHelp ;;
+        *)        showHelp ;;
     esac
 fi
