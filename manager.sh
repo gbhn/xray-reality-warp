@@ -22,11 +22,11 @@ function showQr() {
     local data="$1"
     local label="$2"
     echo ""
-    echo -e "${yellow}QR Code: $label${nc}"
+    echo -e "${yellow}QR: $label${nc}"
     if command -v qrencode &> /dev/null; then
         qrencode -t ANSIUTF8 "$data"
     else
-        echo -e "${red}qrencode не установлен, QR не может быть отображен.${nc}"
+        echo -e "${red}qrencode не установлен.${nc}"
     fi
     echo ""
 }
@@ -39,35 +39,35 @@ function installNode() {
     clear
     
     if [ -f "/usr/local/bin/xray" ]; then
-        echo -e "${yellow}Внимание: Xray уже установлен!${nc}"
-        read -p "Переустановить? Текущая конфигурация будет удалена (y/n): " reinstall
+        echo -e "${yellow}Xray уже установлен.${nc}"
+        read -p "Переустановить? Конфигурация будет удалена [y/n]: " reinstall
         if [[ "$reinstall" != "y" ]]; then
-            echo "Установка отменена."
+            echo "Отменено."
             return
         fi
         systemctl stop xray
         systemctl stop nginx
     fi
 
-    echo -e "${green}Установка Xray + WARP + Individual Subs${nc}\n"
+    echo -e "${green}Установка Xray + WARP${nc}\n"
 
-    read -p "Введите доменное имя: " domain
+    read -p "Домен: " domain
     if [ -z "$domain" ]; then logError "Домен обязателен."; exit 1; fi
 
     echo ""
-    echo "Придумайте секретное слово (оно будет закодировано в Base64)."
-    read -p "Секретное слово (Enter для 'sub'): " seedWord
+    echo "Секретное слово будет закодировано в Base64."
+    read -p "Секретное слово [по умолчанию: sub]: " seedWord
     
     if [ -z "$seedWord" ]; then
         seedWord="sub"
     fi
     
     subUri=$(toBase64 "$seedWord")
-    logInfo "Путь сгенерирован (Base64): /$subUri/"
+    logInfo "Путь: /$subUri/"
 
     randSuffix=$(head /dev/urandom | tr -dc a-z0-9 | head -c 5)
     adminUser="admin_$randSuffix"
-    logInfo "Создается администратор: $adminUser"
+    logInfo "Администратор: $adminUser"
 
     logInfo "Обновление пакетов..."
     apt update -q && apt upgrade -y -q
@@ -98,7 +98,7 @@ EOF
     ./wgcf generate > /dev/null 2>&1
 
     if [ ! -f wgcf-profile.conf ]; then
-        logError "Ошибка генерации WARP конфига."
+        logError "Ошибка генерации WARP."
         exit 1
     fi
 
@@ -114,7 +114,7 @@ EOF
 
     if [ ! -f "$certPath/fullchain.pem" ]; then
         logError "Ошибка получения сертификата."
-        echo "Попробуйте выполнить вручную: certbot certonly --standalone -d $domain"
+        echo "Попробуйте: certbot certonly --standalone -d $domain"
         exit 1
     fi
 
@@ -240,7 +240,7 @@ EOF
     logSuccess "Установка завершена."
     
     echo -e "Пользователь: $adminUser"
-    echo -e "Личная ссылка подписки: $subLink"
+    echo -e "Ссылка подписки: $subLink"
     showQr "$subLink" "Подписка $adminUser"
     
     echo -e "Ключ VLESS: $vlessLink"
@@ -250,18 +250,18 @@ EOF
 function addUser() {
     local userName=$1
 
-    if [ ! -f "$infoFile" ]; then logError "Файл конфигурации не найден."; exit 1; fi
+    if [ ! -f "$infoFile" ]; then logError "Конфигурация не найдена."; exit 1; fi
     source $infoFile
 
     if [[ -z "$userName" ]]; then
-        read -p "Имя нового пользователя (latin): " userName
+        read -p "Имя пользователя: " userName
     fi
 
     if [[ -z "$userName" ]]; then logError "Имя обязательно."; return; fi
 
     userFilename=$(toBase64 "$userName")
     if [ -f "$subsDir/$userFilename" ]; then
-        logError "Пользователь $userName уже существует (файл найден)."
+        logError "Пользователь $userName уже существует."
         return
     fi
 
@@ -284,30 +284,30 @@ function addUser() {
     echo "ID файла: $userFilename"
     
     echo "---------------------------------------------------"
-    echo -e "${yellow}Личная ссылка подписки:${nc} $subLink"
-    showQr "$subLink" "Подписка для $userName"
+    echo -e "${yellow}Ссылка подписки:${nc} $subLink"
+    showQr "$subLink" "Подписка $userName"
     echo "---------------------------------------------------"
 }
 
 function showUserInfo() {
     local targetUser=$1
 
-    if [ ! -f "$infoFile" ]; then logError "Файл конфигурации не найден."; exit 1; fi
+    if [ ! -f "$infoFile" ]; then logError "Конфигурация не найдена."; exit 1; fi
     source $infoFile
 
     if [[ -z "$targetUser" ]]; then
-        echo -e "${yellow}Список пользователей:${nc}"
+        echo -e "${yellow}Пользователи:${nc}"
         jq -r '.inbounds[0].settings.clients[] | .email' $configFile
         echo "--------------------------------"
-        read -p "Введите имя пользователя для просмотра: " targetUser
+        read -p "Имя пользователя: " targetUser
     fi
 
-    if [[ -z "$targetUser" ]]; then echo "Отмена."; return; fi
+    if [[ -z "$targetUser" ]]; then echo "Отменено."; return; fi
 
     local userUuid=$(jq -r --arg email "$targetUser" '.inbounds[0].settings.clients[] | select(.email == $email) | .id' $configFile)
 
     if [[ -z "$userUuid" ]]; then
-        logError "Пользователь $targetUser не найден в конфиге."
+        logError "Пользователь $targetUser не найден."
         return
     fi
 
@@ -318,19 +318,19 @@ function showUserInfo() {
     if [ ! -f "$subsDir/$userFilename" ]; then
         echo -n "$vlessLink" | base64 -w 0 > "$subsDir/$userFilename"
         chmod 644 "$subsDir/$userFilename"
-        logInfo "Файл подписки был восстановлен."
+        logInfo "Файл подписки восстановлен."
     fi
 
     clear
-    echo -e "${green}Данные пользователя: $targetUser${nc}"
+    echo -e "${green}Пользователь: $targetUser${nc}"
     echo "---------------------------------------------------"
     
-    echo -e "1. Ссылка подписки (для приложения):"
+    echo -e "Ссылка подписки:"
     echo -e "${yellow}$subLink${nc}"
-    showQr "$subLink" "Подписка для $targetUser"
+    showQr "$subLink" "Подписка $targetUser"
     
     echo "---------------------------------------------------"
-    echo -e "2. Ключ VLESS (для ручного ввода):"
+    echo -e "Ключ VLESS:"
     echo -e "${yellow}$vlessLink${nc}"
     showQr "$vlessLink" "Ключ VLESS"
 }
@@ -338,20 +338,20 @@ function showUserInfo() {
 function deleteUser() {
     local userName=$1
 
-    if [ ! -f "$infoFile" ]; then logError "Файл конфигурации не найден."; exit 1; fi
+    if [ ! -f "$infoFile" ]; then logError "Конфигурация не найдена."; exit 1; fi
     source $infoFile
 
     if [[ -z "$userName" ]]; then
-        echo -e "${yellow}Активные пользователи:${nc}"
+        echo -e "${yellow}Пользователи:${nc}"
         jq -r '.inbounds[0].settings.clients[] | .email' $configFile
         echo ""
-        read -p "Введите имя для удаления: " userName
+        read -p "Имя для удаления: " userName
     fi
 
-    if [[ -z "$userName" ]]; then echo "Отмена."; return; fi
+    if [[ -z "$userName" ]]; then echo "Отменено."; return; fi
 
     local userExists=$(jq --arg email "$userName" '.inbounds[0].settings.clients[] | select(.email == $email) | .email' $configFile)
-    if [[ -z "$userExists" ]]; then logError "Пользователь не найден в конфиге."; return; fi
+    if [[ -z "$userExists" ]]; then logError "Пользователь не найден."; return; fi
 
     cp $configFile "${configFile}.bak"
     jq --arg email "$userName" 'del(.inbounds[0].settings.clients[] | select(.email == $email))' $configFile > temp.json && mv temp.json $configFile
@@ -361,7 +361,7 @@ function deleteUser() {
     userFilename=$(toBase64 "$userName")
     if [ -f "$subsDir/$userFilename" ]; then
         rm "$subsDir/$userFilename"
-        logSuccess "Файл подписки для $userName удален."
+        logSuccess "Файл подписки $userName удален."
     else
         logInfo "Файл подписки не найден."
     fi
@@ -370,7 +370,7 @@ function deleteUser() {
 }
 
 function uninstallXray() {
-    read -p "Вы уверены, что хотите полностью удалить Xray? (y/n): " confirm
+    read -p "Удалить Xray полностью? [y/n]: " confirm
     if [[ "$confirm" != "y" ]]; then return; fi
 
     logInfo "Остановка сервисов..."
@@ -395,10 +395,10 @@ function uninstallXray() {
 function showMenu() {
     while true; do
         clear
-        echo -e "${green}Xray Manager (Individual Subs)${nc}"
+        echo -e "${green}Xray Manager${nc}"
         echo "1. Установить"
         echo "2. Добавить пользователя"
-        echo "3. Показать пользователя / QR"
+        echo "3. Показать пользователя"
         echo "4. Удалить пользователя"
         echo "5. Удалить Xray"
         echo "0. Выход"
@@ -406,11 +406,11 @@ function showMenu() {
         read -p "> " choice
 
         case "$choice" in
-            1) installNode; read -p "Нажмите Enter..." ;;
-            2) addUser; read -p "Нажмите Enter..." ;;
-            3) showUserInfo; read -p "Нажмите Enter..." ;;
-            4) deleteUser; read -p "Нажмите Enter..." ;;
-            5) uninstallXray; read -p "Нажмите Enter..." ;;
+            1) installNode; read -p "Enter..." ;;
+            2) addUser; read -p "Enter..." ;;
+            3) showUserInfo; read -p "Enter..." ;;
+            4) deleteUser; read -p "Enter..." ;;
+            5) uninstallXray; read -p "Enter..." ;;
             0) exit ;;
             *) ;;
         esac
@@ -419,11 +419,11 @@ function showMenu() {
 
 function showHelp() {
     echo "Использование: $0 [команда]"
-    echo "  install         - Установка"
-    echo "  add <name>      - Добавить пользователя"
-    echo "  show <name>     - Показать QR и ссылки пользователя"
-    echo "  del <name>      - Удалить пользователя"
-    echo "  remove          - Удалить всё"
+    echo "  install       - Установка"
+    echo "  add <name>    - Добавить пользователя"
+    echo "  show <name>   - Показать пользователя"
+    echo "  del <name>    - Удалить пользователя"
+    echo "  remove        - Удалить всё"
 }
 
 if [ $# -eq 0 ]; then
