@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# ============================================================
-# КОНСТАНТЫ И ПУТИ
-# ============================================================
-
 readonly XRAY_DIR="/usr/local/etc/xray"
 readonly INFO_FILE="$XRAY_DIR/install_info.txt"
 readonly CONFIG_FILE="$XRAY_DIR/config.json"
@@ -12,11 +8,7 @@ readonly BACKUP_DIR="$XRAY_DIR/backup"
 readonly SUBS_DIR="/var/www/html/subs"
 readonly CERT_BASE="/etc/letsencrypt/live"
 
-readonly VERSION="3.1"
-
-# ============================================================
-# ЦВЕТА
-# ============================================================
+readonly VERSION="3.2"
 
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -25,171 +17,149 @@ readonly CYAN='\033[0;36m'
 readonly GRAY='\033[0;90m'
 readonly NC='\033[0m'
 
-# ============================================================
-# ЛОГИРОВАНИЕ (ИСПРАВЛЕНО: вывод в stderr)
-# ============================================================
+logInfo() { echo -e "${YELLOW}• $1${NC}" >&2; }
+logSuccess() { echo -e "${GREEN}✓ $1${NC}" >&2; }
+logError() { echo -e "${RED}✕ $1${NC}" >&2; }
+logWarning() { echo -e "${YELLOW}⚠ $1${NC}" >&2; }
 
-log_info()    { echo -e "${YELLOW}• $1${NC}" >&2; }
-log_success() { echo -e "${GREEN}✓ $1${NC}" >&2; }
-log_error()   { echo -e "${RED}✕ $1${NC}" >&2; }
-log_warning() { echo -e "${YELLOW}⚠ $1${NC}" >&2; }
-
-# ============================================================
-# УТИЛИТЫ
-# ============================================================
-
-require_root() {
+requireRoot() {
     if [ "$EUID" -ne 0 ]; then
-        log_error "Запустите скрипт с правами root."
+        logError "Run as root."
         exit 1
     fi
 }
 
-to_base64() {
+toBase64() {
     echo -n "$1" | base64 | tr '+/' '-_' | tr -d '='
 }
 
-generate_uuid() {
+generateUuid() {
     cat /proc/sys/kernel/random/uuid
 }
 
-generate_random_suffix() {
+generateRandomSuffix() {
     head /dev/urandom | tr -dc 'a-z0-9' | head -c 5
 }
 
-validate_username() {
+validateUsername() {
     local name="$1"
     [[ "$name" =~ ^[a-zA-Z0-9_-]{2,32}$ ]]
 }
 
-validate_domain() {
+validateDomain() {
     local domain="$1"
     [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$ ]]
 }
 
-command_exists() {
+commandExists() {
     command -v "$1" &>/dev/null
 }
 
-file_exists() {
+fileExists() {
     [ -f "$1" ]
 }
 
-dir_exists() {
+dirExists() {
     [ -d "$1" ]
 }
 
-show_qr() {
+showQr() {
     local data="$1"
     local label="$2"
     echo "" >&2
     echo -e "${YELLOW}QR: $label${NC}" >&2
-    if command_exists qrencode; then
+    if commandExists qrencode; then
         qrencode -t ANSIUTF8 "$data" >&2
     else
-        log_warning "qrencode не установлен"
+        logWarning "qrencode not installed"
     fi
     echo "" >&2
 }
 
-# Безопасное обновление JSON файла
-safe_json_update() {
+safeJsonUpdate() {
     local file="$1"
-    local jq_filter="$2"
+    local jqFilter="$2"
     shift 2
     
-    local tmpfile=$(mktemp)
-    if jq "$jq_filter" "$@" "$file" > "$tmpfile" && [ -s "$tmpfile" ]; then
-        mv "$tmpfile" "$file"
+    local tmpFile=$(mktemp)
+    if jq "$jqFilter" "$@" "$file" > "$tmpFile" && [ -s "$tmpFile" ]; then
+        mv "$tmpFile" "$file"
         return 0
     else
-        rm -f "$tmpfile"
+        rm -f "$tmpFile"
         return 1
     fi
 }
 
-# ============================================================
-# МОДУЛЬ: ИНФОРМАЦИЯ О СИСТЕМЕ
-# ============================================================
-
-get_install_info() {
+getInstallInfo() {
     local key="$1"
-    if file_exists "$INFO_FILE"; then
+    if fileExists "$INFO_FILE"; then
         grep "^${key}=" "$INFO_FILE" 2>/dev/null | cut -d'=' -f2
     fi
 }
 
-set_install_info() {
+setInstallInfo() {
     local key="$1"
     local value="$2"
     
     mkdir -p "$XRAY_DIR"
     
-    if file_exists "$INFO_FILE" && grep -q "^${key}=" "$INFO_FILE"; then
+    if fileExists "$INFO_FILE" && grep -q "^${key}=" "$INFO_FILE"; then
         sed -i "s|^${key}=.*|${key}=${value}|" "$INFO_FILE"
     else
         echo "${key}=${value}" >> "$INFO_FILE"
     fi
 }
 
-get_domain() {
-    get_install_info "domain" || echo "-"
+getDomain() {
+    getInstallInfo "domain" || echo "-"
 }
 
-get_sub_uri() {
-    get_install_info "subUri"
+getSubUri() {
+    getInstallInfo "subUri"
 }
 
-get_cert_path() {
-    echo "$CERT_BASE/$(get_domain)"
+getCertPath() {
+    echo "$CERT_BASE/$(getDomain)"
 }
 
-# ============================================================
-# МОДУЛЬ: СТАТУС СИСТЕМЫ
-# ============================================================
-
-is_xray_installed() {
-    file_exists "/usr/local/bin/xray"
+isXrayInstalled() {
+    fileExists "/usr/local/bin/xray"
 }
 
-is_service_running() {
+isServiceRunning() {
     systemctl is-active --quiet "$1"
 }
 
-get_status() {
-    if ! is_xray_installed; then
+getStatus() {
+    if ! isXrayInstalled; then
         echo "not_installed"
-    elif is_service_running xray; then
+    elif isServiceRunning xray; then
         echo "running"
     else
         echo "stopped"
     fi
 }
 
-get_user_count() {
-    if file_exists "$CONFIG_FILE"; then
+getUserCount() {
+    if fileExists "$CONFIG_FILE"; then
         jq -r '.inbounds[0].settings.clients | length' "$CONFIG_FILE" 2>/dev/null || echo "0"
     else
         echo "0"
     fi
 }
 
-get_xray_version() {
+getXrayVersion() {
     /usr/local/bin/xray version 2>/dev/null | head -n1 | awk '{print $2}'
 }
 
-get_latest_xray_version() {
+getLatestXrayVersion() {
     curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name' | tr -d 'v'
 }
 
-# ============================================================
-# МОДУЛЬ: КОНФИГУРАЦИЯ XRAY
-# ============================================================
-
-# --- Генерация inbound ---
-generate_inbound() {
+generateInbound() {
     local port="$1"
-    local cert_path="$2"
+    local certPath="$2"
     
     cat <<EOF
 {
@@ -205,8 +175,8 @@ generate_inbound() {
     "security": "tls",
     "tlsSettings": {
       "certificates": [{
-        "certificateFile": "$cert_path/fullchain.pem",
-        "keyFile": "$cert_path/privkey.pem"
+        "certificateFile": "$certPath/fullchain.pem",
+        "keyFile": "$certPath/privkey.pem"
       }],
       "minVersion": "1.2",
       "alpn": ["http/1.1", "h2"]
@@ -220,8 +190,7 @@ generate_inbound() {
 EOF
 }
 
-# --- Генерация клиента ---
-generate_client() {
+generateClient() {
     local uuid="$1"
     local email="$2"
     local flow="${3:-xtls-rprx-vision}"
@@ -236,17 +205,16 @@ generate_client() {
 EOF
 }
 
-# --- Генерация outbound: WARP ---
-generate_outbound_warp() {
-    local private_key="$1"
-    local addresses="$2"  # JSON array: "ip1", "ip2"
+generateOutboundWarp() {
+    local privateKey="$1"
+    local addresses="$2"
     
     cat <<EOF
 {
   "tag": "warp",
   "protocol": "wireguard",
   "settings": {
-    "secretKey": "$private_key",
+    "secretKey": "$privateKey",
     "address": [$addresses],
     "peers": [{
       "publicKey": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
@@ -259,18 +227,15 @@ generate_outbound_warp() {
 EOF
 }
 
-# --- Генерация outbound: Direct ---
-generate_outbound_direct() {
+generateOutboundDirect() {
     echo '{ "tag": "direct", "protocol": "freedom" }'
 }
 
-# --- Генерация outbound: Block ---
-generate_outbound_block() {
+generateOutboundBlock() {
     echo '{ "tag": "block", "protocol": "blackhole" }'
 }
 
-# --- Генерация routing ---
-generate_routing() {
+generateRouting() {
     cat <<EOF
 {
   "domainStrategy": "IPIfNonMatch",
@@ -281,24 +246,23 @@ generate_routing() {
 EOF
 }
 
-# --- ГЛАВНАЯ ФУНКЦИЯ: Сборка полного конфига ---
-build_config() {
-    local cert_path="$1"
-    local warp_key="$2"
-    local warp_addresses="$3"
+buildConfig() {
+    local certPath="$1"
+    local warpKey="$2"
+    local warpAddresses="$3"
     
-    local inbound=$(generate_inbound 443 "$cert_path")
-    local routing=$(generate_routing)
+    local inbound=$(generateInbound 443 "$certPath")
+    local routing=$(generateRouting)
     
     local outbounds
-    if [ -n "$warp_key" ]; then
-        local warp=$(generate_outbound_warp "$warp_key" "$warp_addresses")
-        local direct=$(generate_outbound_direct)
-        local block=$(generate_outbound_block)
+    if [ -n "$warpKey" ]; then
+        local warp=$(generateOutboundWarp "$warpKey" "$warpAddresses")
+        local direct=$(generateOutboundDirect)
+        local block=$(generateOutboundBlock)
         outbounds="[$warp, $block, $direct]"
     else
-        local direct=$(generate_outbound_direct)
-        local block=$(generate_outbound_block)
+        local direct=$(generateOutboundDirect)
+        local block=$(generateOutboundBlock)
         outbounds="[$direct, $block]"
     fi
     
@@ -312,16 +276,14 @@ build_config() {
 EOF
 }
 
-# --- Сохранение конфига ---
-save_config() {
-    local config_json="$1"
+saveConfig() {
+    local configJson="$1"
     mkdir -p "$XRAY_DIR"
-    echo "$config_json" | jq '.' > "$CONFIG_FILE"
+    echo "$configJson" | jq '.' > "$CONFIG_FILE"
 }
 
-# --- Хеш конфига (для детекта изменений) ---
-generate_config_hash() {
-    if ! file_exists "$CONFIG_FILE"; then
+generateConfigHash() {
+    if ! fileExists "$CONFIG_FILE"; then
         return
     fi
     
@@ -332,26 +294,22 @@ generate_config_hash() {
     }' "$CONFIG_FILE" 2>/dev/null | md5sum | awk '{print $1}'
 }
 
-save_config_hash() {
-    generate_config_hash > "$CONFIG_HASH_FILE"
+saveConfigHash() {
+    generateConfigHash > "$CONFIG_HASH_FILE"
 }
 
-check_config_integrity() {
-    if ! file_exists "$CONFIG_HASH_FILE" || ! file_exists "$CONFIG_FILE"; then
+checkConfigIntegrity() {
+    if ! fileExists "$CONFIG_HASH_FILE" || ! fileExists "$CONFIG_FILE"; then
         return 0
     fi
     
     local saved=$(cat "$CONFIG_HASH_FILE" 2>/dev/null)
-    local current=$(generate_config_hash)
+    local current=$(generateConfigHash)
     
     [ "$saved" = "$current" ]
 }
 
-# ============================================================
-# МОДУЛЬ: УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ
-# ============================================================
-
-user_exists() {
+userExists() {
     local email="$1"
     local result=$(jq -r --arg email "$email" \
         '.inbounds[0].settings.clients[] | select(.email == $email) | .email' \
@@ -359,47 +317,42 @@ user_exists() {
     [ -n "$result" ] && [ "$result" != "null" ]
 }
 
-get_user_uuid() {
+getUserUuid() {
     local email="$1"
     jq -r --arg email "$email" \
         '.inbounds[0].settings.clients[] | select(.email == $email) | .id' \
         "$CONFIG_FILE" 2>/dev/null
 }
 
-get_all_users() {
+getAllUsers() {
     jq -r '.inbounds[0].settings.clients[] | .email' "$CONFIG_FILE" 2>/dev/null
 }
 
-get_all_users_json() {
+getAllUsersJson() {
     jq -c '.inbounds[0].settings.clients[]' "$CONFIG_FILE" 2>/dev/null
 }
 
-add_user_to_config() {
+addUserToConfig() {
     local uuid="$1"
     local email="$2"
     local flow="${3:-xtls-rprx-vision}"
     
-    local client=$(generate_client "$uuid" "$email" "$flow")
+    local client=$(generateClient "$uuid" "$email" "$flow")
     
-    safe_json_update "$CONFIG_FILE" \
+    safeJsonUpdate "$CONFIG_FILE" \
         --argjson client "$client" \
         '.inbounds[0].settings.clients += [$client]'
 }
 
-remove_user_from_config() {
+removeUserFromConfig() {
     local email="$1"
     
-    safe_json_update "$CONFIG_FILE" \
+    safeJsonUpdate "$CONFIG_FILE" \
         --arg email "$email" \
         '.inbounds[0].settings.clients |= map(select(.email != $email))'
 }
 
-# ============================================================
-# МОДУЛЬ: ПОДПИСКИ
-# ============================================================
-
-# Генерация VLESS ссылки (единая точка!)
-generate_vless_link() {
+generateVlessLink() {
     local uuid="$1"
     local domain="$2"
     local email="$3"
@@ -407,47 +360,43 @@ generate_vless_link() {
     echo "vless://${uuid}@${domain}:443?security=tls&encryption=none&flow=xtls-rprx-vision&fp=chrome&type=tcp&sni=${domain}#${domain}-${email}"
 }
 
-# Генерация ссылки на подписку
-generate_sub_link() {
+generateSubLink() {
     local domain="$1"
-    local sub_uri="$2"
+    local subUri="$2"
     local email="$3"
     
-    local filename=$(to_base64 "$email")
-    echo "https://${domain}/${sub_uri}/${filename}"
+    local filename=$(toBase64 "$email")
+    echo "https://${domain}/${subUri}/${filename}"
 }
 
-# Создание файла подписки для пользователя
-create_subscription_file() {
+createSubscriptionFile() {
     local email="$1"
     local uuid="$2"
     local domain="$3"
     
-    local filename=$(to_base64 "$email")
-    local vless_link=$(generate_vless_link "$uuid" "$domain" "$email")
+    local filename=$(toBase64 "$email")
+    local vlessLink=$(generateVlessLink "$uuid" "$domain" "$email")
     
     mkdir -p "$SUBS_DIR"
-    echo -n "$vless_link" | base64 -w 0 > "$SUBS_DIR/$filename"
+    echo -n "$vlessLink" | base64 -w 0 > "$SUBS_DIR/$filename"
     chmod 644 "$SUBS_DIR/$filename"
 }
 
-# Удаление файла подписки
-delete_subscription_file() {
+deleteSubscriptionFile() {
     local email="$1"
-    local filename=$(to_base64 "$email")
+    local filename=$(toBase64 "$email")
     rm -f "$SUBS_DIR/$filename"
 }
 
-# Перегенерация всех подписок
-regenerate_all_subscriptions() {
-    local domain="${1:-$(get_domain)}"
+regenerateAllSubscriptions() {
+    local domain="${1:-$(getDomain)}"
     
-    if ! file_exists "$CONFIG_FILE"; then
-        log_error "Конфиг не найден"
+    if ! fileExists "$CONFIG_FILE"; then
+        logError "Config not found"
         return 1
     fi
     
-    log_info "Перегенерация подписок для домена: $domain"
+    logInfo "Regenerating subscriptions for domain: $domain"
     
     rm -rf "$SUBS_DIR"/*
     mkdir -p "$SUBS_DIR"
@@ -458,64 +407,60 @@ regenerate_all_subscriptions() {
         local uuid=$(echo "$line" | jq -r '.id')
         
         if [ -n "$email" ] && [ "$email" != "null" ]; then
-            create_subscription_file "$email" "$uuid" "$domain"
+            createSubscriptionFile "$email" "$uuid" "$domain"
             echo -e "  ${GREEN}✓${NC} $email" >&2
             ((count++))
         fi
-    done < <(get_all_users_json)
+    done < <(getAllUsersJson)
     
-    log_success "Обновлено: $count"
+    logSuccess "Updated: $count"
 }
 
-# ============================================================
-# МОДУЛЬ: БЭКАПЫ
-# ============================================================
-
-create_backup() {
+createBackup() {
     mkdir -p "$BACKUP_DIR"
     local timestamp=$(date +%Y%m%d_%H%M%S)
-    local backup_path="$BACKUP_DIR/$timestamp"
-    mkdir -p "$backup_path"
+    local backupPath="$BACKUP_DIR/$timestamp"
+    mkdir -p "$backupPath"
     
-    log_info "Создание бэкапа..."
+    logInfo "Creating backup..."
     
-    if file_exists "$CONFIG_FILE"; then
-        jq '.inbounds[0].settings.clients' "$CONFIG_FILE" > "$backup_path/users.json" 2>/dev/null
-        cp "$CONFIG_FILE" "$backup_path/config.json.bak"
+    if fileExists "$CONFIG_FILE"; then
+        jq '.inbounds[0].settings.clients' "$CONFIG_FILE" > "$backupPath/users.json" 2>/dev/null
+        cp "$CONFIG_FILE" "$backupPath/config.json.bak"
     fi
     
-    if dir_exists "$SUBS_DIR" && [ "$(ls -A "$SUBS_DIR" 2>/dev/null)" ]; then
-        cp -r "$SUBS_DIR" "$backup_path/subs_backup"
+    if dirExists "$SUBS_DIR" && [ "$(ls -A "$SUBS_DIR" 2>/dev/null)" ]; then
+        cp -r "$SUBS_DIR" "$backupPath/subs_backup"
     fi
     
-    if file_exists "$INFO_FILE"; then
-        cp "$INFO_FILE" "$backup_path/install_info.txt.bak"
+    if fileExists "$INFO_FILE"; then
+        cp "$INFO_FILE" "$backupPath/install_info.txt.bak"
     fi
     
-    echo "$backup_path" > "$BACKUP_DIR/latest"
+    echo "$backupPath" > "$BACKUP_DIR/latest"
     
-    local user_count=$(jq 'length' "$backup_path/users.json" 2>/dev/null || echo 0)
-    log_success "Сохранено пользователей: $user_count"
+    local userCount=$(jq 'length' "$backupPath/users.json" 2>/dev/null || echo 0)
+    logSuccess "Users saved: $userCount"
     
-    echo "$backup_path"
+    echo "$backupPath"
 }
 
-restore_users_from_backup() {
-    local backup_path="$1"
-    local skip_admin="$2"
+restoreUsersFromBackup() {
+    local backupPath="$1"
+    local currentAdmin="$2"
     local domain="$3"
     
-    if ! file_exists "$backup_path/users.json"; then
-        log_info "Бэкап пользователей не найден"
+    if ! fileExists "$backupPath/users.json"; then
+        logInfo "Users backup not found"
         return 0
     fi
     
-    local user_count=$(jq 'length' "$backup_path/users.json" 2>/dev/null || echo 0)
-    if [ "$user_count" -eq 0 ]; then
+    local userCount=$(jq 'length' "$backupPath/users.json" 2>/dev/null || echo 0)
+    if [ "$userCount" -eq 0 ]; then
         return 0
     fi
     
-    log_info "Восстановление $user_count пользователей..."
+    logInfo "Restoring $userCount users..."
     
     local restored=0
     local skipped=0
@@ -525,39 +470,41 @@ restore_users_from_backup() {
         local uuid=$(echo "$user" | jq -r '.id')
         local flow=$(echo "$user" | jq -r '.flow // "xtls-rprx-vision"')
         
-        # Пропуск нового админа
-        if [ -n "$skip_admin" ] && [ "$email" = "$skip_admin" ]; then
+        if [ -n "$currentAdmin" ] && [ "$email" = "$currentAdmin" ]; then
             ((skipped++))
             continue
         fi
         
-        # Пропуск существующих
-        if user_exists "$email"; then
+        if [[ "$email" == admin_* ]]; then
             ((skipped++))
             continue
         fi
         
-        if add_user_to_config "$uuid" "$email" "$flow"; then
+        if userExists "$email"; then
+            ((skipped++))
+            continue
+        fi
+        
+        if addUserToConfig "$uuid" "$email" "$flow"; then
             ((restored++))
         fi
         
-    done < <(jq -c '.[]' "$backup_path/users.json")
+    done < <(jq -c '.[]' "$backupPath/users.json")
     
-    log_success "Восстановлено: $restored, пропущено: $skipped"
+    logSuccess "Restored: $restored, Skipped: $skipped"
     
-    # Перегенерация подписок
     if [ $restored -gt 0 ]; then
-        regenerate_all_subscriptions "$domain"
+        regenerateAllSubscriptions "$domain"
     fi
 }
 
-list_backups() {
+listBackups() {
     echo ""
-    echo -e "${CYAN}Доступные бэкапы:${NC}"
+    echo -e "${CYAN}Available Backups:${NC}"
     echo "─────────────────────────────────────────"
     
-    if ! dir_exists "$BACKUP_DIR"; then
-        echo -e "${GRAY}  Бэкапы отсутствуют${NC}"
+    if ! dirExists "$BACKUP_DIR"; then
+        echo -e "${GRAY}  No backups found${NC}"
         echo "─────────────────────────────────────────"
         return
     fi
@@ -566,22 +513,18 @@ list_backups() {
     for dir in $(ls -1d "$BACKUP_DIR"/20* 2>/dev/null | sort -r | head -10); do
         local name=$(basename "$dir")
         local users=$(jq 'length' "$dir/users.json" 2>/dev/null || echo "?")
-        echo -e "  $i. ${CYAN}$name${NC} | пользователей: $users"
+        echo -e "  $i. ${CYAN}$name${NC} | users: $users"
         ((i++))
     done
     
     if [ $i -eq 1 ]; then
-        echo -e "${GRAY}  Бэкапы отсутствуют${NC}"
+        echo -e "${GRAY}  No backups found${NC}"
     fi
     
     echo "─────────────────────────────────────────"
 }
 
-# ============================================================
-# МОДУЛЬ: WARP
-# ============================================================
-
-get_system_arch() {
+getSystemArch() {
     case $(uname -m) in
         x86_64)  echo "amd64" ;;
         aarch64) echo "arm64" ;;
@@ -590,15 +533,15 @@ get_system_arch() {
     esac
 }
 
-generate_warp_keys() {
-    local arch=$(get_system_arch)
+generateWarpKeys() {
+    local arch=$(getSystemArch)
     
     if [ -z "$arch" ]; then
-        log_error "Архитектура не поддерживается для WARP"
+        logError "Arch not supported for WARP"
         return 1
     fi
     
-    log_info "Генерация ключей WARP..."
+    logInfo "Generating WARP keys..."
     
     pushd /tmp > /dev/null
     
@@ -608,7 +551,7 @@ generate_warp_keys() {
     local url="https://github.com/ViRb3/wgcf/releases/download/v${version}/wgcf_${version}_linux_${arch}"
     
     if ! wget -qO wgcf "$url" || [ ! -s wgcf ]; then
-        log_error "Не удалось скачать wgcf"
+        logError "Failed to download wgcf"
         popd > /dev/null
         return 1
     fi
@@ -619,8 +562,8 @@ generate_warp_keys() {
     
     local result=""
     
-    if file_exists wgcf-profile.conf; then
-        local private_key=$(grep "^PrivateKey" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
+    if fileExists wgcf-profile.conf; then
+        local privateKey=$(grep "^PrivateKey" wgcf-profile.conf | cut -d'=' -f2 | tr -d ' ')
         local ipv4=$(grep "^Address" wgcf-profile.conf | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -1)
         local ipv6=$(grep "^Address" wgcf-profile.conf | grep -oE '[0-9a-fA-F:]+:[0-9a-fA-F:]+/[0-9]+' | head -1)
         
@@ -629,12 +572,12 @@ generate_warp_keys() {
         local addresses="\"$ipv4\""
         if [ -n "$ipv6" ]; then
             addresses="\"$ipv4\", \"$ipv6\""
-            log_success "WARP: IPv4 + IPv6"
+            logSuccess "WARP: IPv4 + IPv6"
         else
-            log_info "WARP: только IPv4"
+            logInfo "WARP: IPv4 only"
         fi
         
-        result="${private_key}|${addresses}"
+        result="${privateKey}|${addresses}"
     fi
     
     rm -f wgcf wgcf-account.toml wgcf-profile.conf
@@ -643,11 +586,7 @@ generate_warp_keys() {
     echo "$result"
 }
 
-# ============================================================
-# МОДУЛЬ: NGINX
-# ============================================================
-
-configure_nginx_acme() {
+configureNginxAcme() {
     local domain="$1"
     
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null
@@ -669,9 +608,9 @@ server {
 EOF
 }
 
-configure_nginx_fallback() {
+configureNginxFallback() {
     local domain="$1"
-    local sub_uri="$2"
+    local subUri="$2"
     
     cat > /etc/nginx/conf.d/fallback.conf <<EOF
 server {
@@ -680,7 +619,7 @@ server {
     root /var/www/html;
     index index.html;
     
-    location /$sub_uri/ {
+    location /$subUri/ {
         alias $SUBS_DIR/;
         default_type text/plain;
         autoindex off;
@@ -693,20 +632,16 @@ server {
 EOF
 }
 
-# ============================================================
-# МОДУЛЬ: SSL
-# ============================================================
-
-obtain_ssl_certificate() {
+obtainSslCertificate() {
     local domain="$1"
-    local cert_path="$CERT_BASE/$domain"
+    local certPath="$CERT_BASE/$domain"
     
-    if file_exists "$cert_path/fullchain.pem"; then
-        log_info "Сертификат уже существует"
+    if fileExists "$certPath/fullchain.pem"; then
+        logInfo "Certificate already exists"
         return 0
     fi
     
-    log_info "Получение SSL сертификата..."
+    logInfo "Obtaining SSL certificate..."
     
     certbot certonly \
         --webroot \
@@ -716,15 +651,15 @@ obtain_ssl_certificate() {
         --agree-tos \
         -m "admin@$domain"
     
-    if ! file_exists "$cert_path/fullchain.pem"; then
-        log_error "Ошибка получения сертификата"
+    if ! fileExists "$certPath/fullchain.pem"; then
+        logError "Failed to obtain certificate"
         return 1
     fi
     
-    log_success "SSL сертификат получен"
+    logSuccess "SSL certificate obtained"
 }
 
-setup_ssl_renewal_hook() {
+setupSslRenewalHook() {
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
     
     cat > /etc/letsencrypt/renewal-hooks/deploy/01-restart-xray.sh <<'EOF'
@@ -738,37 +673,32 @@ EOF
     fi
 }
 
-get_ssl_days_left() {
+getSslDaysLeft() {
     local domain="$1"
-    local cert_path="$CERT_BASE/$domain/fullchain.pem"
+    local certPath="$CERT_BASE/$domain/fullchain.pem"
     
-    if ! file_exists "$cert_path"; then
+    if ! fileExists "$certPath"; then
         echo "-1"
         return
     fi
     
-    local expiry=$(openssl x509 -enddate -noout -in "$cert_path" 2>/dev/null | cut -d= -f2)
+    local expiry=$(openssl x509 -enddate -noout -in "$certPath" 2>/dev/null | cut -d= -f2)
     if [ -z "$expiry" ]; then
         echo "-1"
         return
     fi
     
-    local expiry_epoch=$(date -d "$expiry" +%s 2>/dev/null)
-    local now_epoch=$(date +%s)
+    local expiryEpoch=$(date -d "$expiry" +%s 2>/dev/null)
+    local nowEpoch=$(date +%s)
     
-    echo $(( (expiry_epoch - now_epoch) / 86400 ))
+    echo $(( (expiryEpoch - nowEpoch) / 86400 ))
 }
 
-# ============================================================
-# МОДУЛЬ: УСТАНОВКА XRAY
-# ============================================================
-
-install_xray_binary() {
-    log_info "Установка Xray..."
+installXrayBinary() {
+    logInfo "Installing Xray..."
     
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
     
-    # Патч systemd unit
     sed -i 's/User=nobody/User=root/' /etc/systemd/system/xray.service
     sed -i '/^CapabilityBoundingSet/d' /etc/systemd/system/xray.service
     sed -i '/^AmbientCapabilities/d' /etc/systemd/system/xray.service
@@ -776,7 +706,7 @@ install_xray_binary() {
     systemctl daemon-reload
 }
 
-apply_sysctl_tweaks() {
+applySysctlTweaks() {
     cat > /etc/sysctl.d/99-xray-performance.conf <<EOF
 fs.file-max = 1000000
 net.core.default_qdisc = fq
@@ -788,24 +718,20 @@ EOF
     sysctl --system > /dev/null 2>&1
 }
 
-# ============================================================
-# КОМАНДЫ: ПОЛЬЗОВАТЕЛИ
-# ============================================================
-
-cmd_list_users() {
-    if ! file_exists "$CONFIG_FILE"; then
-        log_error "Конфигурация не найдена"
+cmdListUsers() {
+    if ! fileExists "$CONFIG_FILE"; then
+        logError "Config not found"
         return 1
     fi
     
     echo ""
-    echo -e "${CYAN}Пользователи:${NC}"
+    echo -e "${CYAN}Users:${NC}"
     echo "─────────────────────────────"
     
-    local users=$(get_all_users)
+    local users=$(getAllUsers)
     
     if [ -z "$users" ]; then
-        echo -e "${GRAY}  Нет пользователей${NC}"
+        echo -e "${GRAY}  No users${NC}"
     else
         local i=1
         while IFS= read -r user; do
@@ -817,388 +743,370 @@ cmd_list_users() {
     echo "─────────────────────────────"
 }
 
-cmd_add_user() {
+cmdAddUser() {
     local username="$1"
-    local domain=$(get_domain)
-    local sub_uri=$(get_sub_uri)
+    local domain=$(getDomain)
+    local subUri=$(getSubUri)
     
-    if ! file_exists "$INFO_FILE"; then
-        log_error "Конфигурация не найдена"
+    if ! fileExists "$INFO_FILE"; then
+        logError "Config not found"
         return 1
     fi
     
     if [ -z "$username" ]; then
-        cmd_list_users
-        read -p "Имя нового пользователя: " username
+        cmdListUsers
+        read -p "New username: " username
     fi
     
     if [ -z "$username" ]; then
-        log_error "Имя обязательно"
+        logError "Username required"
         return 1
     fi
     
-    if ! validate_username "$username"; then
-        log_error "Имя может содержать только буквы, цифры, _ и - (2-32 символа)"
+    if ! validateUsername "$username"; then
+        logError "Invalid username (2-32 chars, letters, numbers, _, -)"
         return 1
     fi
     
-    if user_exists "$username"; then
-        log_error "Пользователь $username уже существует"
+    if userExists "$username"; then
+        logError "User $username already exists"
         return 1
     fi
     
-    local uuid=$(generate_uuid)
+    local uuid=$(generateUuid)
     
     cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
     
-    if ! add_user_to_config "$uuid" "$username"; then
-        log_error "Ошибка добавления пользователя"
+    if ! addUserToConfig "$uuid" "$username"; then
+        logError "Failed to add user"
         return 1
     fi
     
     systemctl restart xray
     
-    create_subscription_file "$username" "$uuid" "$domain"
+    createSubscriptionFile "$username" "$uuid" "$domain"
     
-    local sub_link=$(generate_sub_link "$domain" "$sub_uri" "$username")
-    local vless_link=$(generate_vless_link "$uuid" "$domain" "$username")
+    local subLink=$(generateSubLink "$domain" "$subUri" "$username")
     
-    log_success "Пользователь $username добавлен"
+    logSuccess "User $username added"
     
     echo ""
-    echo -e "${YELLOW}Ссылка подписки:${NC} $sub_link"
-    show_qr "$sub_link" "Подписка $username"
+    echo -e "${YELLOW}Subscription link:${NC} $subLink"
+    showQr "$subLink" "Subscription $username"
 }
 
-cmd_show_user() {
+cmdShowUser() {
     local username="$1"
-    local domain=$(get_domain)
-    local sub_uri=$(get_sub_uri)
+    local domain=$(getDomain)
+    local subUri=$(getSubUri)
     
-    if ! file_exists "$INFO_FILE"; then
-        log_error "Конфигурация не найдена"
+    if ! fileExists "$INFO_FILE"; then
+        logError "Config not found"
         return 1
     fi
     
     if [ -z "$username" ]; then
-        cmd_list_users
-        read -p "Имя пользователя: " username
+        cmdListUsers
+        read -p "Username: " username
     fi
     
     if [ -z "$username" ]; then
         return 0
     fi
     
-    local uuid=$(get_user_uuid "$username")
+    local uuid=$(getUserUuid "$username")
     
     if [ -z "$uuid" ] || [ "$uuid" = "null" ]; then
-        log_error "Пользователь $username не найден"
+        logError "User $username not found"
         return 1
     fi
     
-    local sub_link=$(generate_sub_link "$domain" "$sub_uri" "$username")
-    local vless_link=$(generate_vless_link "$uuid" "$domain" "$username")
+    local subLink=$(generateSubLink "$domain" "$subUri" "$username")
+    local vlessLink=$(generateVlessLink "$uuid" "$domain" "$username")
     
-    # Восстановление файла подписки если нужно
-    local filename=$(to_base64 "$username")
-    if ! file_exists "$SUBS_DIR/$filename"; then
-        create_subscription_file "$username" "$uuid" "$domain"
-        log_info "Файл подписки восстановлен"
+    local filename=$(toBase64 "$username")
+    if ! fileExists "$SUBS_DIR/$filename"; then
+        createSubscriptionFile "$username" "$uuid" "$domain"
+        logInfo "Subscription file restored"
     fi
     
     clear
-    echo -e "${GREEN}Пользователь: $username${NC}"
+    echo -e "${GREEN}User: $username${NC}"
     echo "─────────────────────────────────────────"
-    echo -e "Ссылка подписки:"
-    echo -e "${YELLOW}$sub_link${NC}"
-    show_qr "$sub_link" "Подписка"
+    echo -e "Subscription:"
+    echo -e "${YELLOW}$subLink${NC}"
+    showQr "$subLink" "Subscription"
     echo "─────────────────────────────────────────"
-    echo -e "Ключ VLESS:"
-    echo -e "${YELLOW}$vless_link${NC}"
-    show_qr "$vless_link" "VLESS"
+    echo -e "VLESS Key:"
+    echo -e "${YELLOW}$vlessLink${NC}"
+    showQr "$vlessLink" "VLESS"
 }
 
-cmd_delete_user() {
+cmdDeleteUser() {
     local username="$1"
     
-    if ! file_exists "$INFO_FILE"; then
-        log_error "Конфигурация не найдена"
+    if ! fileExists "$INFO_FILE"; then
+        logError "Config not found"
         return 1
     fi
     
     if [ -z "$username" ]; then
-        cmd_list_users
-        read -p "Имя для удаления: " username
+        cmdListUsers
+        read -p "Username to delete: " username
     fi
     
     if [ -z "$username" ]; then
         return 0
     fi
     
-    if ! user_exists "$username"; then
-        log_error "Пользователь не найден"
+    if ! userExists "$username"; then
+        logError "User not found"
         return 1
     fi
     
-    read -p "Удалить $username? [y/n]: " confirm
+    read -p "Delete $username? [y/n]: " confirm
     if [ "$confirm" != "y" ]; then
-        echo "Отменено"
+        echo "Cancelled"
         return 0
     fi
     
     cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
     
-    if ! remove_user_from_config "$username"; then
-        log_error "Ошибка удаления"
+    if ! removeUserFromConfig "$username"; then
+        logError "Failed to delete"
         return 1
     fi
     
     systemctl restart xray
-    delete_subscription_file "$username"
+    deleteSubscriptionFile "$username"
     
-    log_success "Пользователь $username удалён"
+    logSuccess "User $username deleted"
 }
 
-# ============================================================
-# КОМАНДЫ: СИСТЕМА
-# ============================================================
-
-cmd_health_check() {
+cmdHealthCheck() {
     echo ""
-    log_info "Проверка системы..."
+    logInfo "System Check..."
     echo ""
     echo "─────────────────────────────────────"
     
     local issues=0
-    local domain=$(get_domain)
+    local domain=$(getDomain)
     
-    # Xray
-    if is_service_running xray; then
-        echo -e "  Xray:        ${GREEN}✓ работает${NC}"
+    if isServiceRunning xray; then
+        echo -e "  Xray:        ${GREEN}✓ running${NC}"
     else
-        echo -e "  Xray:        ${RED}✕ остановлен${NC}"
+        echo -e "  Xray:        ${RED}✕ stopped${NC}"
         ((issues++))
     fi
     
-    # Nginx
-    if is_service_running nginx; then
-        echo -e "  Nginx:       ${GREEN}✓ работает${NC}"
+    if isServiceRunning nginx; then
+        echo -e "  Nginx:       ${GREEN}✓ running${NC}"
     else
-        echo -e "  Nginx:       ${RED}✕ остановлен${NC}"
+        echo -e "  Nginx:       ${RED}✕ stopped${NC}"
         ((issues++))
     fi
     
-    # Порт 443
     if ss -tlnp | grep -q ':443'; then
-        echo -e "  Порт 443:    ${GREEN}✓ открыт${NC}"
+        echo -e "  Port 443:    ${GREEN}✓ open${NC}"
     else
-        echo -e "  Порт 443:    ${RED}✕ закрыт${NC}"
+        echo -e "  Port 443:    ${RED}✕ closed${NC}"
         ((issues++))
     fi
     
-    # SSL
-    local days_left=$(get_ssl_days_left "$domain")
-    if [ "$days_left" -gt 30 ]; then
-        echo -e "  SSL:         ${GREEN}✓ $days_left дней${NC}"
-    elif [ "$days_left" -gt 7 ]; then
-        echo -e "  SSL:         ${YELLOW}⚠ $days_left дней${NC}"
+    local daysLeft=$(getSslDaysLeft "$domain")
+    if [ "$daysLeft" -gt 30 ]; then
+        echo -e "  SSL:         ${GREEN}✓ $daysLeft days${NC}"
+    elif [ "$daysLeft" -gt 7 ]; then
+        echo -e "  SSL:         ${YELLOW}⚠ $daysLeft days${NC}"
         ((issues++))
-    elif [ "$days_left" -ge 0 ]; then
-        echo -e "  SSL:         ${RED}✕ $days_left дней!${NC}"
+    elif [ "$daysLeft" -ge 0 ]; then
+        echo -e "  SSL:         ${RED}✕ $daysLeft days!${NC}"
         ((issues++))
     else
-        echo -e "  SSL:         ${RED}✕ не найден${NC}"
+        echo -e "  SSL:         ${RED}✕ not found${NC}"
         ((issues++))
     fi
     
-    # Certbot timer
-    if is_service_running certbot.timer; then
-        echo -e "  Auto-Renew:  ${GREEN}✓ активен${NC}"
+    if isServiceRunning certbot.timer; then
+        echo -e "  Auto-Renew:  ${GREEN}✓ active${NC}"
     else
-        echo -e "  Auto-Renew:  ${YELLOW}⚠ не запущен${NC}"
+        echo -e "  Auto-Renew:  ${YELLOW}⚠ inactive${NC}"
     fi
     
-    # Целостность конфига
-    if check_config_integrity; then
-        echo -e "  Конфиг:      ${GREEN}✓ OK${NC}"
+    if checkConfigIntegrity; then
+        echo -e "  Config:      ${GREEN}✓ OK${NC}"
     else
-        echo -e "  Конфиг:      ${YELLOW}⚠ изменён${NC}"
+        echo -e "  Config:      ${YELLOW}⚠ changed${NC}"
         ((issues++))
     fi
     
-    # Пользователи
-    echo -e "  Users:       ${CYAN}$(get_user_count)${NC}"
+    echo -e "  Users:       ${CYAN}$(getUserCount)${NC}"
     
     echo "─────────────────────────────────────"
     echo ""
     
     if [ $issues -eq 0 ]; then
-        log_success "Все проверки пройдены"
+        logSuccess "All checks passed"
     else
-        log_error "Проблем: $issues"
+        logError "Issues found: $issues"
     fi
 }
 
-cmd_status() {
+cmdStatus() {
     echo ""
-    log_info "Статус сервисов..."
+    logInfo "Service Status..."
     echo ""
     
-    if is_service_running xray; then
-        echo -e "  Xray:  ${GREEN}●${NC} работает (v$(get_xray_version))"
+    if isServiceRunning xray; then
+        echo -e "  Xray:  ${GREEN}●${NC} running (v$(getXrayVersion))"
     else
-        echo -e "  Xray:  ${RED}●${NC} остановлен"
+        echo -e "  Xray:  ${RED}●${NC} stopped"
     fi
     
-    if is_service_running nginx; then
-        echo -e "  Nginx: ${GREEN}●${NC} работает"
+    if isServiceRunning nginx; then
+        echo -e "  Nginx: ${GREEN}●${NC} running"
     else
-        echo -e "  Nginx: ${RED}●${NC} остановлен"
+        echo -e "  Nginx: ${RED}●${NC} stopped"
     fi
     
     echo ""
-    echo "  Пользователей: $(get_user_count)"
+    echo "  Users: $(getUserCount)"
 }
 
-cmd_restart() {
-    log_info "Перезапуск сервисов..."
+cmdRestart() {
+    logInfo "Restarting services..."
     systemctl restart xray
     systemctl restart nginx
     sleep 1
-    cmd_status
+    cmdStatus
 }
 
-cmd_update_xray() {
+cmdUpdateXray() {
     echo ""
     
-    if ! is_xray_installed; then
-        log_error "Xray не установлен"
+    if ! isXrayInstalled; then
+        logError "Xray not installed"
         return 1
     fi
     
-    local current=$(get_xray_version)
-    local latest=$(get_latest_xray_version)
+    local current=$(getXrayVersion)
+    local latest=$(getLatestXrayVersion)
     
-    echo "  Текущая:   $current"
-    echo "  Последняя: $latest"
+    echo "  Current: $current"
+    echo "  Latest:  $latest"
     echo ""
     
     if [ "$current" = "$latest" ]; then
-        log_success "Уже последняя версия"
+        logSuccess "Already latest version"
         return 0
     fi
     
-    read -p "Обновить? [y/n]: " confirm
+    read -p "Update? [y/n]: " confirm
     if [ "$confirm" != "y" ]; then
         return 0
     fi
     
-    create_backup
+    createBackup
     
-    log_info "Обновление..."
-    install_xray_binary
+    logInfo "Updating..."
+    installXrayBinary
     
     systemctl restart xray
     
-    log_success "Обновлено: $current → $(get_xray_version)"
+    logSuccess "Updated: $current → $(getXrayVersion)"
 }
 
-cmd_renew_ssl() {
-    log_info "Принудительное обновление SSL..."
+cmdRenewSsl() {
+    logInfo "Forcing SSL renewal..."
     
-    if ! command_exists certbot; then
-        log_error "Certbot не установлен"
+    if ! commandExists certbot; then
+        logError "Certbot not installed"
         return 1
     fi
     
     if certbot renew --force-renewal; then
         systemctl restart xray
-        log_success "Сертификат обновлён"
+        logSuccess "Certificate updated"
     else
-        log_error "Ошибка обновления"
+        logError "Update failed"
     fi
 }
 
-cmd_regenerate_subs() {
-    local domain=$(get_domain)
-    local sub_uri=$(get_sub_uri)
+cmdRegenerateSubs() {
+    local domain=$(getDomain)
+    local subUri=$(getSubUri)
     
     echo ""
-    log_warning "Перегенерация подписок"
-    echo "Текущий домен: $domain"
-    echo "Текущий путь: /$sub_uri/"
+    logWarning "Regenerating subscriptions"
+    echo "Current domain: $domain"
+    echo "Current path: /$subUri/"
     echo ""
     
-    read -p "Изменить домен? [y/n]: " change
+    read -p "Change domain? [y/n]: " change
     
     if [ "$change" = "y" ]; then
-        read -p "Новый домен [$domain]: " new_domain
-        new_domain="${new_domain:-$domain}"
+        read -p "New domain [$domain]: " newDomain
+        newDomain="${newDomain:-$domain}"
         
-        read -p "Новое секретное слово [Enter=оставить]: " new_seed
-        if [ -n "$new_seed" ]; then
-            sub_uri=$(to_base64 "$new_seed")
+        read -p "New secret word [Enter to keep]: " newSeed
+        if [ -n "$newSeed" ]; then
+            subUri=$(toBase64 "$newSeed")
         fi
         
-        set_install_info "domain" "$new_domain"
-        set_install_info "subUri" "$sub_uri"
+        setInstallInfo "domain" "$newDomain"
+        setInstallInfo "subUri" "$subUri"
         
-        configure_nginx_fallback "$new_domain" "$sub_uri"
+        configureNginxFallback "$newDomain" "$subUri"
         systemctl restart nginx
         
-        domain="$new_domain"
+        domain="$newDomain"
     fi
     
-    read -p "Продолжить? [y/n]: " confirm
+    read -p "Continue? [y/n]: " confirm
     if [ "$confirm" != "y" ]; then
         return 0
     fi
     
-    regenerate_all_subscriptions "$domain"
+    regenerateAllSubscriptions "$domain"
     
-    log_success "Готово! Ссылки: https://$domain/$sub_uri/<user>"
+    logSuccess "Done! Links: https://$domain/$subUri/<user>"
 }
 
-cmd_accept_config() {
+cmdAcceptConfig() {
     echo ""
-    log_warning "Принять текущий конфиг как эталон?"
-    echo "Скрипт перестанет предупреждать об изменениях."
+    logWarning "Accept current config as baseline?"
+    echo "Script will stop warning about changes."
     echo ""
     
-    read -p "Подтвердить? [y/n]: " confirm
+    read -p "Confirm? [y/n]: " confirm
     if [ "$confirm" = "y" ]; then
-        save_config_hash
-        log_success "Изменения приняты"
+        saveConfigHash
+        logSuccess "Changes accepted"
     fi
 }
 
-# ============================================================
-# КОМАНДА: УСТАНОВКА
-# ============================================================
-
-cmd_install() {
+cmdInstall() {
     clear
     
-    local saved_backup=""
-    local old_domain=""
+    local savedBackup=""
+    local oldDomain=""
     
-    # Проверка существующей установки
-    if is_xray_installed; then
-        echo -e "${YELLOW}Xray уже установлен${NC}"
+    if isXrayInstalled; then
+        echo -e "${YELLOW}Xray already installed${NC}"
         echo ""
-        echo "  1. Переустановить (сохранить пользователей)"
-        echo "  2. Чистая установка"
-        echo "  0. Отмена"
+        echo "  1. Reinstall (save users)"
+        echo "  2. Clean install"
+        echo "  0. Cancel"
         echo ""
-        read -p "Выбор: " choice
+        read -p "Choice: " choice
         
         case "$choice" in
             1)
-                saved_backup=$(create_backup)
-                old_domain=$(get_domain)
+                savedBackup=$(createBackup)
+                oldDomain=$(getDomain)
                 ;;
             2)
-                read -p "Удалить всех пользователей? [y/n]: " confirm
+                read -p "Delete ALL users? [y/n]: " confirm
                 [ "$confirm" != "y" ] && return 0
                 ;;
             *)
@@ -1209,145 +1117,126 @@ cmd_install() {
         systemctl stop xray nginx 2>/dev/null
     fi
     
-    echo -e "${GREEN}Установка Xray + WARP${NC}"
+    echo -e "${GREEN}Installing Xray + WARP${NC}"
     echo ""
     
-    # Домен
-    if [ -n "$old_domain" ]; then
-        read -p "Домен [$old_domain]: " domain
-        domain="${domain:-$old_domain}"
+    if [ -n "$oldDomain" ]; then
+        read -p "Domain [$oldDomain]: " domain
+        domain="${domain:-$oldDomain}"
     else
-        read -p "Домен: " domain
+        read -p "Domain: " domain
     fi
     
     if [ -z "$domain" ]; then
-        log_error "Домен обязателен"
+        logError "Domain required"
         return 1
     fi
     
-    # Секретное слово
     echo ""
-    read -p "Секретное слово [sub]: " seed_word
-    seed_word="${seed_word:-sub}"
-    local sub_uri=$(to_base64 "$seed_word")
-    log_info "Путь подписок: /$sub_uri/"
+    read -p "Secret word [sub]: " seedWord
+    seedWord="${seedWord:-sub}"
+    local subUri=$(toBase64 "$seedWord")
+    logInfo "Subs path: /$subUri/"
     
-    # Админ
-    local admin_user="admin_$(generate_random_suffix)"
-    log_info "Администратор: $admin_user"
+    local adminUser="admin_$(generateRandomSuffix)"
+    logInfo "Admin: $adminUser"
     
-    # Пакеты
-    log_info "Установка пакетов..."
+    logInfo "Installing packages..."
     apt update -q && apt upgrade -y -q
     apt install -y -q curl socat nginx certbot lsb-release jq qrencode
     
-    # Директории
     rm -rf "$SUBS_DIR"
     mkdir -p "$SUBS_DIR" /var/www/html
     chmod 755 "$SUBS_DIR"
     chown www-data:www-data "$SUBS_DIR"
     
-    # Sysctl
-    apply_sysctl_tweaks
+    applySysctlTweaks
     
-    # WARP
-    local warp_result=$(generate_warp_keys)
-    local warp_key=""
-    local warp_addresses=""
+    local warpResult=$(generateWarpKeys)
+    local warpKey=""
+    local warpAddresses=""
     
-    if [ -n "$warp_result" ]; then
-        warp_key=$(echo "$warp_result" | cut -d'|' -f1)
-        warp_addresses=$(echo "$warp_result" | cut -d'|' -f2)
+    if [ -n "$warpResult" ]; then
+        warpKey=$(echo "$warpResult" | cut -d'|' -f1)
+        warpAddresses=$(echo "$warpResult" | cut -d'|' -f2)
     fi
     
-    # Nginx для ACME
-    configure_nginx_acme "$domain"
+    configureNginxAcme "$domain"
     systemctl restart nginx
     
-    # SSL
-    if ! obtain_ssl_certificate "$domain"; then
-        log_error "Проверьте, что $domain указывает на IP сервера"
+    if ! obtainSslCertificate "$domain"; then
+        logError "Check DNS pointing to this server"
         return 1
     fi
     
-    setup_ssl_renewal_hook
+    setupSslRenewalHook
     
-    # Xray binary
-    install_xray_binary
+    installXrayBinary
     
-    # Конфиг
-    local cert_path="$CERT_BASE/$domain"
-    local config_json=$(build_config "$cert_path" "$warp_key" "$warp_addresses")
-    save_config "$config_json"
+    local certPath="$CERT_BASE/$domain"
+    local configJson=$(buildConfig "$certPath" "$warpKey" "$warpAddresses")
+    saveConfig "$configJson"
     
-    # Добавляем админа
-    local admin_uuid=$(generate_uuid)
-    add_user_to_config "$admin_uuid" "$admin_user"
+    local adminUuid=$(generateUuid)
+    addUserToConfig "$adminUuid" "$adminUser"
     
-    # Nginx fallback
-    configure_nginx_fallback "$domain" "$sub_uri"
+    configureNginxFallback "$domain" "$subUri"
     
     if [ ! -f "/var/www/html/index.html" ]; then
         echo "<h1>Welcome</h1>" > /var/www/html/index.html
     fi
     
-    # Сохраняем info
-    set_install_info "domain" "$domain"
-    set_install_info "subUri" "$sub_uri"
+    setInstallInfo "domain" "$domain"
+    setInstallInfo "subUri" "$subUri"
     
-    # Подписка админа
-    create_subscription_file "$admin_user" "$admin_uuid" "$domain"
+    createSubscriptionFile "$adminUser" "$adminUuid" "$domain"
     
-    # Восстановление пользователей
-    if [ -n "$saved_backup" ]; then
-        restore_users_from_backup "$saved_backup" "$admin_user" "$domain"
+    if [ -n "$savedBackup" ]; then
+        restoreUsersFromBackup "$savedBackup" "$adminUser" "$domain"
     fi
     
-    # Хеш конфига
-    save_config_hash
+    saveConfigHash
     
-    # Запуск
     systemctl restart nginx xray
     systemctl enable xray nginx > /dev/null 2>&1
     
     sleep 2
     
-    if is_service_running xray; then
-        log_success "Xray запущен!"
+    if isServiceRunning xray; then
+        logSuccess "Xray started!"
     else
-        log_error "Xray не запустился: journalctl -u xray -n 50"
+        logError "Xray failed start: journalctl -u xray -n 50"
     fi
     
-    # Итоги
     echo ""
-    log_success "Установка завершена"
+    logSuccess "Installation complete"
     echo ""
-    echo "  Пользователей: $(get_user_count)"
-    echo "  Администратор: $admin_user"
+    echo "  Users: $(getUserCount)"
+    echo "  Admin: $adminUser"
     echo ""
     
-    local sub_link=$(generate_sub_link "$domain" "$sub_uri" "$admin_user")
-    echo -e "  Подписка: ${YELLOW}$sub_link${NC}"
-    show_qr "$sub_link" "Подписка $admin_user"
+    local subLink=$(generateSubLink "$domain" "$subUri" "$adminUser")
+    echo -e "  Subscription: ${YELLOW}$subLink${NC}"
+    showQr "$subLink" "Subscription $adminUser"
 }
 
-cmd_uninstall() {
+cmdUninstall() {
     echo ""
-    echo -e "${RED}Удаление Xray${NC}"
+    echo -e "${RED}Uninstalling Xray${NC}"
     echo ""
-    echo "  1. Удалить (сохранить бэкап)"
-    echo "  2. Удалить полностью"
-    echo "  0. Отмена"
+    echo "  1. Uninstall (save backup)"
+    echo "  2. Uninstall completely"
+    echo "  0. Cancel"
     echo ""
-    read -p "Выбор: " choice
+    read -p "Choice: " choice
     
     case "$choice" in
         1)
-            create_backup
-            log_success "Бэкап сохранён в $BACKUP_DIR"
+            createBackup
+            logSuccess "Backup saved to $BACKUP_DIR"
             ;;
         2)
-            read -p "Удалить ВСЁ включая бэкапы? [y/n]: " confirm
+            read -p "Delete EVERYTHING including backups? [y/n]: " confirm
             [ "$confirm" != "y" ] && return 0
             rm -rf "$BACKUP_DIR"
             ;;
@@ -1356,11 +1245,11 @@ cmd_uninstall() {
             ;;
     esac
     
-    log_info "Остановка сервисов..."
+    logInfo "Stopping services..."
     systemctl stop xray
     systemctl disable xray > /dev/null 2>&1
     
-    log_info "Удаление файлов..."
+    logInfo "Removing files..."
     rm -rf /usr/local/bin/xray
     rm -rf "$XRAY_DIR"
     rm -rf /usr/local/share/xray
@@ -1375,224 +1264,215 @@ cmd_uninstall() {
     systemctl daemon-reload
     systemctl restart nginx
     
-    log_success "Удалено"
+    logSuccess "Uninstalled"
     
-    if dir_exists "$BACKUP_DIR"; then
-        echo -e "${YELLOW}Бэкапы: $BACKUP_DIR${NC}"
+    if dirExists "$BACKUP_DIR"; then
+        echo -e "${YELLOW}Backups: $BACKUP_DIR${NC}"
     fi
 }
 
-cmd_restore_backup() {
-    list_backups
+cmdRestoreBackup() {
+    listBackups
     
-    if ! dir_exists "$BACKUP_DIR"; then
+    if ! dirExists "$BACKUP_DIR"; then
         return 0
     fi
     
     echo ""
-    read -p "Имя бэкапа: " backup_name
+    read -p "Backup name: " backupName
     
-    if [ -z "$backup_name" ]; then
+    if [ -z "$backupName" ]; then
         return 0
     fi
     
-    local backup_path="$BACKUP_DIR/$backup_name"
+    local backupPath="$BACKUP_DIR/$backupName"
     
-    if ! dir_exists "$backup_path"; then
-        log_error "Бэкап не найден"
+    if ! dirExists "$backupPath"; then
+        logError "Backup not found"
         return 1
     fi
     
-    if ! file_exists "$INFO_FILE"; then
-        log_error "Сначала установите Xray"
+    if ! fileExists "$INFO_FILE"; then
+        logError "Install Xray first"
         return 1
     fi
     
-    read -p "Восстановить из $backup_name? [y/n]: " confirm
+    read -p "Restore from $backupName? [y/n]: " confirm
     [ "$confirm" != "y" ] && return 0
     
-    restore_users_from_backup "$backup_path" "" "$(get_domain)"
+    restoreUsersFromBackup "$backupPath" "" "$(getDomain)"
     systemctl restart xray
     
-    log_success "Восстановлено"
+    logSuccess "Restored"
 }
 
-# ============================================================
-# МЕНЮ
-# ============================================================
-
-show_menu() {
+showMenu() {
     while true; do
         clear
         
-        local config_changed=false
-        check_config_integrity || config_changed=true
+        local configChanged=false
+        checkConfigIntegrity || configChanged=true
         
         echo -e "${CYAN}═══════════════════════════════════════${NC}"
         echo -e "${CYAN}          XRAY MANAGER v${VERSION}${NC}"
         echo -e "${CYAN}═══════════════════════════════════════${NC}"
         
-        local status=$(get_status)
+        local status=$(getStatus)
         
         case $status in
             running)
-                echo -e "  Статус: ${GREEN}● Работает${NC}"
-                echo -e "  Домен:  $(get_domain)"
-                echo -e "  Users:  $(get_user_count)"
+                echo -e "  Status: ${GREEN}● Running${NC}"
+                echo -e "  Domain: $(getDomain)"
+                echo -e "  Users:  $(getUserCount)"
                 ;;
             stopped)
-                echo -e "  Статус: ${RED}● Остановлен${NC}"
-                echo -e "  Домен:  $(get_domain)"
+                echo -e "  Status: ${RED}● Stopped${NC}"
+                echo -e "  Domain: $(getDomain)"
                 ;;
             not_installed)
-                echo -e "  Статус: ${GRAY}○ Не установлен${NC}"
+                echo -e "  Status: ${GRAY}○ Not Installed${NC}"
                 ;;
         esac
         
-        if [ "$config_changed" = true ]; then
-            echo -e "  ${RED}⚠ Конфиг изменён!${NC}"
+        if [ "$configChanged" = true ]; then
+            echo -e "  ${RED}⚠ Config changed!${NC}"
         fi
         
         echo -e "${CYAN}───────────────────────────────────────${NC}"
         
         if [ "$status" != "not_installed" ]; then
-            echo -e "${YELLOW} Пользователи${NC}"
-            echo "  1. Список"
-            echo "  2. Добавить"
-            echo "  3. Показать"
-            echo "  4. Удалить"
+            echo -e "${YELLOW} Users${NC}"
+            echo "  1. List"
+            echo "  2. Add"
+            echo "  3. Show"
+            echo "  4. Delete"
             echo ""
-            echo -e "${YELLOW} Система${NC}"
-            echo "  5. Health check"
-            echo "  6. Перезапустить"
-            echo "  7. Обновить Xray"
-            echo "  8. Обновить SSL"
+            echo -e "${YELLOW} System${NC}"
+            echo "  5. Health Check"
+            echo "  6. Restart"
+            echo "  7. Update Xray"
+            echo "  8. Renew SSL"
             echo ""
-            echo -e "${YELLOW} Подписки${NC}"
-            echo "  9. Перегенерировать все"
-            echo "  10. Бэкапы"
-            echo "  11. Восстановить"
+            echo -e "${YELLOW} Subscriptions${NC}"
+            echo "  9. Regenerate All"
+            echo "  10. Backups"
+            echo "  11. Restore"
             
-            if [ "$config_changed" = true ]; then
+            if [ "$configChanged" = true ]; then
                 echo ""
-                echo -e "${RED} Конфиг${NC}"
-                echo "  12. Принять изменения"
+                echo -e "${RED} Config${NC}"
+                echo "  12. Accept Changes"
             fi
             
             echo ""
-            echo -e "${GRAY}  20. Переустановить${NC}"
-            echo -e "${GRAY}  21. Удалить${NC}"
+            echo -e "${GRAY}  20. Reinstall${NC}"
+            echo -e "${GRAY}  21. Uninstall${NC}"
         else
             echo ""
-            echo "  1. Установить"
+            echo "  1. Install"
             
-            if dir_exists "$BACKUP_DIR" && [ "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
-                echo -e "${YELLOW}  2. Показать бэкапы${NC}"
+            if dirExists "$BACKUP_DIR" && [ "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
+                echo -e "${YELLOW}  2. Show Backups${NC}"
             fi
         fi
         
         echo ""
-        echo "  0. Выход"
+        echo "  0. Exit"
         echo -e "${CYAN}───────────────────────────────────────${NC}"
         read -p "  > " choice
         
         if [ "$status" = "not_installed" ]; then
             case "$choice" in
-                1) cmd_install; read -p "Enter..." ;;
-                2) list_backups; read -p "Enter..." ;;
+                1) cmdInstall; read -p "Enter..." ;;
+                2) listBackups; read -p "Enter..." ;;
                 0) exit 0 ;;
             esac
         else
             case "$choice" in
-                1)  cmd_list_users; read -p "Enter..." ;;
-                2)  cmd_add_user; read -p "Enter..." ;;
-                3)  cmd_show_user; read -p "Enter..." ;;
-                4)  cmd_delete_user; read -p "Enter..." ;;
-                5)  cmd_health_check; read -p "Enter..." ;;
-                6)  cmd_restart; read -p "Enter..." ;;
-                7)  cmd_update_xray; read -p "Enter..." ;;
-                8)  cmd_renew_ssl; read -p "Enter..." ;;
-                9)  cmd_regenerate_subs; read -p "Enter..." ;;
-                10) list_backups; read -p "Enter..." ;;
-                11) cmd_restore_backup; read -p "Enter..." ;;
-                12) cmd_accept_config; read -p "Enter..." ;;
-                20) cmd_install; read -p "Enter..." ;;
-                21) cmd_uninstall; read -p "Enter..." ;;
+                1)  cmdListUsers; read -p "Enter..." ;;
+                2)  cmdAddUser; read -p "Enter..." ;;
+                3)  cmdShowUser; read -p "Enter..." ;;
+                4)  cmdDeleteUser; read -p "Enter..." ;;
+                5)  cmdHealthCheck; read -p "Enter..." ;;
+                6)  cmdRestart; read -p "Enter..." ;;
+                7)  cmdUpdateXray; read -p "Enter..." ;;
+                8)  cmdRenewSsl; read -p "Enter..." ;;
+                9)  cmdRegenerateSubs; read -p "Enter..." ;;
+                10) listBackups; read -p "Enter..." ;;
+                11) cmdRestoreBackup; read -p "Enter..." ;;
+                12) cmdAcceptConfig; read -p "Enter..." ;;
+                20) cmdInstall; read -p "Enter..." ;;
+                21) cmdUninstall; read -p "Enter..." ;;
                 0)  exit 0 ;;
             esac
         fi
     done
 }
 
-show_help() {
+showHelp() {
     cat <<EOF
 Xray Manager v$VERSION
 
-Использование: $0 [команда] [аргументы]
+Usage: $0 [command] [args]
 
-Пользователи:
-  list              Список пользователей
-  add <name>        Добавить пользователя
-  show <name>       Показать данные
-  del <name>        Удалить
+Users:
+  list              List users
+  add <name>        Add user
+  show <name>       Show details
+  del <name>        Delete user
 
-Система:
-  install           Установить
-  health            Проверка системы
-  status            Статус сервисов
-  restart           Перезапустить
-  update            Обновить Xray
-  renew             Обновить SSL
+System:
+  install           Install
+  health            System check
+  status            Service status
+  restart           Restart services
+  update            Update Xray
+  renew             Renew SSL
 
-Подписки:
-  regen             Перегенерировать все
-  backup            Создать бэкап
-  backups           Список бэкапов
-  restore           Восстановить
+Subs:
+  regen             Regenerate all
+  backup            Create backup
+  backups           List backups
+  restore           Restore backup
 
-Прочее:
-  accept-config     Принять изменения конфига
-  remove            Удалить Xray
-  help              Справка
+Misc:
+  accept-config     Accept config changes
+  remove            Uninstall
+  help              Help
 EOF
 }
 
-# ============================================================
-# MAIN
-# ============================================================
+requireRoot
 
-require_root
-
-# Проверка зависимостей
-if [ "$(get_status)" != "not_installed" ]; then
+if [ "$(getStatus)" != "not_installed" ]; then
     for cmd in jq curl; do
-        if ! command_exists "$cmd"; then
+        if ! commandExists "$cmd"; then
             apt update -q && apt install -y "$cmd"
         fi
     done
 fi
 
 if [ $# -eq 0 ]; then
-    show_menu
+    showMenu
 else
     case "$1" in
-        install)        cmd_install ;;
-        list)           cmd_list_users ;;
-        add)            cmd_add_user "$2" ;;
-        show)           cmd_show_user "$2" ;;
-        del)            cmd_delete_user "$2" ;;
-        health)         cmd_health_check ;;
-        status)         cmd_status ;;
-        restart)        cmd_restart ;;
-        update)         cmd_update_xray ;;
-        renew)          cmd_renew_ssl ;;
-        regen)          cmd_regenerate_subs ;;
-        backup)         create_backup ;;
-        backups)        list_backups ;;
-        restore)        cmd_restore_backup ;;
-        accept-config)  cmd_accept_config ;;
-        remove)         cmd_uninstall ;;
-        help|-h|--help) show_help ;;
-        *)              show_help; exit 1 ;;
+        install)        cmdInstall ;;
+        list)           cmdListUsers ;;
+        add)            cmdAddUser "$2" ;;
+        show)           cmdShowUser "$2" ;;
+        del)            cmdDeleteUser "$2" ;;
+        health)         cmdHealthCheck ;;
+        status)         cmdStatus ;;
+        restart)        cmdRestart ;;
+        update)         cmdUpdateXray ;;
+        renew)          cmdRenewSsl ;;
+        regen)          cmdRegenerateSubs ;;
+        backup)         createBackup ;;
+        backups)        listBackups ;;
+        restore)        cmdRestoreBackup ;;
+        accept-config)  cmdAcceptConfig ;;
+        remove)         cmdUninstall ;;
+        help|-h|--help) showHelp ;;
+        *)              showHelp; exit 1 ;;
     esac
 fi
