@@ -12,7 +12,7 @@ readonly BACKUP_DIR="$XRAY_DIR/backup"
 readonly SUBS_DIR="/var/www/html/subs"
 readonly CERT_BASE="/etc/letsencrypt/live"
 
-readonly VERSION="3.0"
+readonly VERSION="3.1"
 
 # ============================================================
 # ЦВЕТА
@@ -26,13 +26,13 @@ readonly GRAY='\033[0;90m'
 readonly NC='\033[0m'
 
 # ============================================================
-# ЛОГИРОВАНИЕ
+# ЛОГИРОВАНИЕ (ИСПРАВЛЕНО: вывод в stderr)
 # ============================================================
 
-log_info()    { echo -e "${YELLOW}• $1${NC}"; }
-log_success() { echo -e "${GREEN}✓ $1${NC}"; }
-log_error()   { echo -e "${RED}✕ $1${NC}"; }
-log_warning() { echo -e "${YELLOW}⚠ $1${NC}"; }
+log_info()    { echo -e "${YELLOW}• $1${NC}" >&2; }
+log_success() { echo -e "${GREEN}✓ $1${NC}" >&2; }
+log_error()   { echo -e "${RED}✕ $1${NC}" >&2; }
+log_warning() { echo -e "${YELLOW}⚠ $1${NC}" >&2; }
 
 # ============================================================
 # УТИЛИТЫ
@@ -82,14 +82,14 @@ dir_exists() {
 show_qr() {
     local data="$1"
     local label="$2"
-    echo ""
-    echo -e "${YELLOW}QR: $label${NC}"
+    echo "" >&2
+    echo -e "${YELLOW}QR: $label${NC}" >&2
     if command_exists qrencode; then
-        qrencode -t ANSIUTF8 "$data"
+        qrencode -t ANSIUTF8 "$data" >&2
     else
         log_warning "qrencode не установлен"
     fi
-    echo ""
+    echo "" >&2
 }
 
 # Безопасное обновление JSON файла
@@ -183,7 +183,7 @@ get_latest_xray_version() {
 }
 
 # ============================================================
-# МОДУЛЬ: КОНФИГУРАЦИЯ XRAY (ЦЕНТРАЛИЗОВАННО!)
+# МОДУЛЬ: КОНФИГУРАЦИЯ XRAY
 # ============================================================
 
 # --- Генерация inbound ---
@@ -459,7 +459,7 @@ regenerate_all_subscriptions() {
         
         if [ -n "$email" ] && [ "$email" != "null" ]; then
             create_subscription_file "$email" "$uuid" "$domain"
-            echo -e "  ${GREEN}✓${NC} $email"
+            echo -e "  ${GREEN}✓${NC} $email" >&2
             ((count++))
         fi
     done < <(get_all_users_json)
